@@ -1,11 +1,20 @@
 ---
 name: hello-multimodal
-description: "当默认模型不具备视觉理解或图片生成能力时，自动路由到 config.json 中配置的多模态模型（按优先级 fallback）。适用：分析截图、理解流程图、描述嵌入图片、生成配图。"
+description: "视觉理解 & 图片生成。路由规则：生图需求始终使用此技能（Claude/GPT/DeepSeek 等文本模型均无法生图）。视觉理解时若主模型不支持 vision（如 DeepSeek）则调用此技能；若主模型本身支持 vision（如 Claude Opus/Sonnet、GPT-4o）则优先使用主模型。适用：分析截图、理解流程图、描述嵌入图片、生成配图、文档图片理解。"
 ---
 
 # HelloMultimodal
 
-多模态视觉理解 & 图片生成 Skill。通过 `config.json` 配置 3 个 API 渠道，按优先级自动 fallback。
+## 路由规则
+
+| 需求 | 主模型有能力 | 主模型无能力 |
+|------|------------|------------|
+| **视觉理解** | 主模型直接处理 | → 调用此技能 |
+| **图片生成** | → 始终调用此技能 | → 调用此技能 |
+
+- Claude Opus/Sonnet 有 vision → 看图直接用 Claude，不调用技能
+- DeepSeek 无 vision → 看图自动调用此技能
+- 所有模型均无法生图 → 生图始终走此技能
 
 ## 配置 (config.json)
 
