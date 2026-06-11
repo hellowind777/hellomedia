@@ -67,29 +67,46 @@ def extract_image(content):
     return None
 
 def try_channel(channel, prompt, timeout):
-    """Try image generation on a single channel."""
+    """Try image generation — chat first, then images API fallback."""
     import requests
+    headers = {"Authorization": f"Bearer {channel['api_key']}", "Content-Type": "application/json"}
+    base = channel["base_url"]
+
+    # Method 1: Chat/Completions (multimodal models may output images)
     try:
         resp = requests.post(
-            f"{channel['base_url']}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {channel['api_key']}", "Content-Type": "application/json"},
+            f"{base}/v1/chat/completions", headers=headers,
             json={"model": channel["model"], "messages": [{"role": "user", "content": build_generation_prompt(prompt)}], "max_tokens": 4096},
             timeout=timeout
         )
-        if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}"
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            img = extract_image(content)
+            if img: return True, img
+            if "http" in content and any(e in content for e in (".png",".jpg",".webp",".jpeg")):
+                return True, {"url": content}
+    except Exception:
+        pass
 
-        data = resp.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        img_data = extract_image(content)
-        if img_data:
-            return True, img_data
-        # Check if response contains an image URL
-        if "http" in content and any(ext in content for ext in (".png", ".jpg", ".webp", ".jpeg")):
-            return True, {"url": content}
-        return False, "No image data in response"
-    except Exception as e:
-        return False, str(e)
+    # Method 2: Images API (DALL-E compatible)
+    try:
+        size = parse_size_from_prompt(prompt) or "1024x1024"
+        resp = requests.post(
+            f"{base}/v1/images/generations", headers=headers,
+            json={"model": channel["model"], "prompt": prompt, "n": 1, "size": size, "response_format": "b64_json"},
+            timeout=timeout
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            b64 = data.get("data", [{}])[0].get("b64_json", "")
+            if b64: return True, base64.b64decode(b64)
+        elif resp.status_code != 404:
+            pass  # Endpoint might not exist, that's OK
+    except Exception:
+        pass
+
+    return False, "No image generated (tried chat + images API)"
 
 def main():
     parser = argparse.ArgumentParser(description="HelloMultimodal Image Generation")
