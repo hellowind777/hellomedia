@@ -67,20 +67,23 @@ def extract_image(content):
     return None
 
 def try_channel(channel, prompt, timeout):
-    """Try image generation — uses image_model with /v1/images/generations endpoint."""
+    """Try image generation — uses image_model + optional dedicated image_api_key."""
     import requests
-    headers = {"Authorization": f"Bearer {channel['api_key']}", "Content-Type": "application/json"}
-    base = channel["base_url"]
-    # Use dedicated image model if configured, otherwise fall back to chat model
+    # Use dedicated image credentials if configured, otherwise fallback to main channel credentials
+    img_key = channel.get("image_api_key") or channel["api_key"]
+    img_base = channel.get("image_base_url") or channel["base_url"]
     image_model = channel.get("image_model") or channel["model"]
 
-    # Primary: Images API with image_model (like helloimage does)
+    if not img_key:
+        return False, "No API key configured (image_api_key or api_key required)"
+
+    headers = {"Authorization": f"Bearer {img_key}", "Content-Type": "application/json"}
+
     try:
         size = parse_size_from_prompt(prompt) or "1024x1024"
-        # Normalize size format for images API (some require WxH without spaces)
         size = size.replace(" ", "")
         resp = requests.post(
-            f"{base}/v1/images/generations", headers=headers,
+            f"{img_base}/v1/images/generations", headers=headers,
             json={"model": image_model, "prompt": prompt, "n": 1, "size": size, "response_format": "b64_json"},
             timeout=timeout
         )

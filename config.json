@@ -6,6 +6,8 @@
       "api_key": "sk-1a4fbd3322d47ecf27923868aa73c226d247314185b889e957bd35ef67da6ffa",
       "model": "gpt-5.4",
       "image_model": "gpt-image-2",
+      "image_api_key": "",
+      "image_base_url": "",
       "vision": true,
       "generate": true,
       "priority": 1
@@ -16,6 +18,8 @@
       "api_key": "",
       "model": "gpt-4o",
       "image_model": "gpt-image-2",
+      "image_api_key": "",
+      "image_base_url": "",
       "vision": true,
       "generate": true,
       "priority": 2
