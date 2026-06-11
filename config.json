@@ -1,0 +1,38 @@
+{
+  "channels": [
+    {
+      "name": "hi-code GPT-5.4",
+      "base_url": "https://api-cn.hi-code.cc",
+      "api_key": "sk-1a4fbd3322d47ecf27923868aa73c226d247314185b889e957bd35ef67da6ffa",
+      "model": "gpt-5.4",
+      "vision": true,
+      "generate": true,
+      "priority": 1
+    },
+    {
+      "name": "OpenAI GPT-4o",
+      "base_url": "https://api.openai.com",
+      "api_key": "",
+      "model": "gpt-4o",
+      "vision": true,
+      "generate": true,
+      "priority": 2
+    },
+    {
+      "name": "Ollama Local",
+      "base_url": "http://localhost:11434",
+      "api_key": "ollama",
+      "model": "llava:latest",
+      "vision": true,
+      "generate": false,
+      "priority": 3
+    }
+  ],
+  "defaults": {
+    "max_tokens": 4096,
+    "timeout_seconds": 300,
+    "retry_count": 2,
+    "image_size": "1024x1024",
+    "image_quality": "medium"
+  }
+}

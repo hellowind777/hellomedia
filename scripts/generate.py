@@ -1,91 +1,109 @@
 #!/usr/bin/env python3
 """
-HelloExpert Multimodal — Image generation via GPT-5.4 chat/completions
-Generates report illustrations, charts, and diagrams for bid review reports.
+HelloMultimodal — Image generation with multi-channel fallback.
+Reads config.json, tries channels by priority, falls back on failure.
+Borrows image extraction logic from helloimage (magic bytes, base64 decode).
 """
 
 import base64, json, os, sys, argparse, time
 from pathlib import Path
 
-def load_config():
-    config = {}
-    paths = [Path.home() / ".helloexpert" / "gpt_api.txt", Path(os.getcwd()) / "gpt_api.txt"]
-    for config_path in paths:
-        if config_path.exists():
-            for line in config_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"): continue
-                for sep in ("：", "=", ": "):
-                    if sep in line:
-                        key, val = line.split(sep, 1)
-                        config[key.strip().strip('"').strip("'")] = val.strip().strip('"').strip("'")
-                        break
-            break
-    return config
+SKILL_DIR = Path(__file__).parent.parent
+IMAGE_MAGIC = ("iVBOR", "/9j/", "UklGR", "R0lGOD", "Qk")
 
-def generate_image(api_key, base_url, model, prompt, size="1024x1024"):
-    """Generate image via chat/completions (GPT-5.4 multimodal can output images)"""
+def load_channels():
+    cfg_path = SKILL_DIR / "config.json"
+    if not cfg_path.exists():
+        print(f"config.json not found at {cfg_path}", file=sys.stderr)
+        sys.exit(1)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    channels = [c for c in cfg.get("channels", []) if c.get("generate")]
+    channels.sort(key=lambda c: c.get("priority", 99))
+    defaults = cfg.get("defaults", {})
+    return channels, defaults
+
+def extract_image(content):
+    """Extract base64 image from response text. Adapted from helloimage."""
+    if not content: return None
+    if "data:image" in content:
+        for part in content.split(","):
+            part = part.strip()
+            if any(part.startswith(m) for m in IMAGE_MAGIC):
+                return base64.b64decode(part)
+    for line in content.split("\n"):
+        line = line.strip()
+        if line and any(line.startswith(m) for m in IMAGE_MAGIC):
+            try: return base64.b64decode(line)
+            except: pass
+    return None
+
+def try_channel(channel, prompt, timeout):
+    """Try image generation on a single channel."""
     import requests
+    try:
+        resp = requests.post(
+            f"{channel['base_url']}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {channel['api_key']}", "Content-Type": "application/json"},
+            json={"model": channel["model"], "messages": [{"role": "user", "content": f"Generate an image based on this description. Output the image as a base64-encoded PNG: {prompt}"}], "max_tokens": 4096},
+            timeout=timeout
+        )
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}"
 
-    resp = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": f"Generate an image: {prompt}. Output the image directly."}],
-            "max_tokens": 4096,
-        },
-        timeout=300
-    )
-    data = resp.json()
-
-    # Try to extract image from response
-    if "choices" in data:
-        content = data["choices"][0]["message"]["content"]
-        # Check if response contains base64 image data
-        if "data:image" in content or content.startswith("/9j/") or content.startswith("iVBOR"):
-            return {"type": "base64", "data": content, "model": model}
-        # Check for image URL
-        if "http" in content and (".png" in content or ".jpg" in content or ".webp" in content):
-            return {"type": "url", "data": content, "model": model}
-
-    return {"type": "text", "data": data, "model": model}
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        img_data = extract_image(content)
+        if img_data:
+            return True, img_data
+        # Check if response contains an image URL
+        if "http" in content and any(ext in content for ext in (".png", ".jpg", ".webp", ".jpeg")):
+            return True, {"url": content}
+        return False, "No image data in response"
+    except Exception as e:
+        return False, str(e)
 
 def main():
-    parser = argparse.ArgumentParser(description="HelloExpert Image Generation")
-    parser.add_argument("--prompt", required=True, help="Image generation prompt")
+    parser = argparse.ArgumentParser(description="HelloMultimodal Image Generation")
+    parser.add_argument("--prompt", required=True, help="Generation prompt")
     parser.add_argument("--output", default="./output/generated.png", help="Output path")
-    parser.add_argument("--size", default="1024x1024", help="Image size (default 1024x1024)")
+    parser.add_argument("--channel", type=int, default=None, help="Force specific channel")
     args = parser.parse_args()
 
-    config = load_config()
-    api_key = config.get("api-key", os.environ.get("GPT_API_KEY", ""))
-    base_url = config.get("base_url", "https://api-cn.hi-code.cc")
-    model = config.get("model", "gpt-5.4")
+    channels, defaults = load_channels()
+    timeout = defaults.get("timeout_seconds", 300)
+    retry_count = defaults.get("retry_count", 2)
 
-    if not api_key:
-        print(json.dumps({"error": "No API key found"}), file=sys.stderr)
+    targets = [c for c in channels if args.channel is None or c["priority"] == args.channel]
+    if not targets:
+        print(json.dumps({"error": "No matching generate channels"}), file=sys.stderr)
         sys.exit(1)
 
-    print(f"Generating image with {model}...", file=sys.stderr)
-    result = generate_image(api_key, base_url, model, args.prompt, args.size)
+    errors = []
+    for channel in targets:
+        for attempt in range(retry_count + 1):
+            label = f"{channel['name']} ({channel['model']})"
+            if attempt > 0:
+                print(f"Retry {attempt} with {label}...", file=sys.stderr)
+                time.sleep(2)
+            else:
+                print(f"Trying {label}...", file=sys.stderr)
 
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+            ok, result = try_channel(channel, args.prompt, timeout)
+            if ok:
+                out = Path(args.output)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(result, bytes):
+                    out.write_bytes(result)
+                    print(f"Image saved to {args.output} ({len(result)} bytes)", file=sys.stderr)
+                elif isinstance(result, dict) and "url" in result:
+                    print(f"Image URL: {result['url']}", file=sys.stderr)
+                    out.with_suffix(".json").write_text(json.dumps({"url": result["url"], "_channel": channel["name"]}, ensure_ascii=False, indent=2), encoding="utf-8")
+                return
+            errors.append(f"{label}: {result}")
+            break
 
-    if result["type"] == "base64":
-        data = result["data"]
-        # Strip data URL prefix if present
-        if data.startswith("data:image"):
-            data = data.split(",", 1)[1]
-        output_path.write_bytes(base64.b64decode(data))
-        print(f"Image saved to {args.output}", file=sys.stderr)
-    elif result["type"] == "url":
-        print(f"Image URL: {result['data']}", file=sys.stderr)
-        print(json.dumps(result, ensure_ascii=False))
-    else:
-        print(f"No image generated. Raw response saved.", file=sys.stderr)
-        output_path.with_suffix(".json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"error": "All channels failed", "details": errors}, ensure_ascii=False), file=sys.stderr)
+    sys.exit(1)
 
 if __name__ == "__main__":
     main()
