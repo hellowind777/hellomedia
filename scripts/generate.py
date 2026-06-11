@@ -11,6 +11,35 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent
 IMAGE_MAGIC = ("iVBOR", "/9j/", "UklGR", "R0lGOD", "Qk")
 
+# Natural language size/ratio patterns — extracted from prompt, NOT overridden by defaults
+SIZE_PATTERNS = [
+    (r'\b(\d{3,4})[x×](\d{3,4})\b', lambda m: f"{m[1]}x{m[2]}"),           # 1920x1080
+    (r'\b(\d+):(\d+)\s*(?:ratio|比例)?\b', lambda m: f"{m[1]}:{m[2]}"),     # 16:9 ratio
+    (r'\b(portrait|vertical|竖屏|纵向|竖版)\b', lambda _: "portrait"),        # portrait
+    (r'\b(landscape|horizontal|横屏|横向|横版)\b', lambda _: "landscape"),    # landscape
+    (r'\b(square|方形|正方形)\b', lambda _: "square"),                        # square
+    (r'\b(banner|横幅|banner图)\b', lambda _: "landscape"),                   # banner
+    (r'\b(poster|海报)\b', lambda _: "portrait"),                             # poster
+    (r'\b(widescreen|宽屏|宽幅)\b', lambda _: "21:9"),                        # widescreen
+]
+
+def parse_size_from_prompt(prompt):
+    """Extract size/ratio intent from natural language. Returns None if not specified."""
+    import re
+    for pattern, resolver in SIZE_PATTERNS:
+        m = re.search(pattern, prompt, re.IGNORECASE)
+        if m:
+            return resolver(m)
+    return None
+
+def build_generation_prompt(user_prompt):
+    """Build the final prompt — only add size hint if user explicitly specified one."""
+    size = parse_size_from_prompt(user_prompt)
+    if size:
+        return f"Generate an image: {user_prompt}. Use {size} dimensions."
+    # No size specified → let the model freely interpret
+    return f"Generate an image: {user_prompt}."
+
 def load_channels():
     cfg_path = SKILL_DIR / "config.json"
     if not cfg_path.exists():
@@ -44,7 +73,7 @@ def try_channel(channel, prompt, timeout):
         resp = requests.post(
             f"{channel['base_url']}/v1/chat/completions",
             headers={"Authorization": f"Bearer {channel['api_key']}", "Content-Type": "application/json"},
-            json={"model": channel["model"], "messages": [{"role": "user", "content": f"Generate an image based on this description. Output the image as a base64-encoded PNG: {prompt}"}], "max_tokens": 4096},
+            json={"model": channel["model"], "messages": [{"role": "user", "content": build_generation_prompt(prompt)}], "max_tokens": 4096},
             timeout=timeout
         )
         if resp.status_code != 200:
