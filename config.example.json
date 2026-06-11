@@ -1,31 +1,31 @@
 {
   "channels": [
     {
-      "name": "hi-code GPT",
-      "base_url": "https://api-cn.hi-code.cc",
-      "api_key": "sk-1a4fbd3322d47ecf27923868aa73c226d247314185b889e957bd35ef67da6ffa",
-      "model": "gpt-5.4",
-      "image_model": "gpt-image-2",
-      "image_api_key": "sk-1a4fbd3322d47ecf27923868aa73c226d247314185b889e957bd35ef67da6ffa",
-      "image_base_url": "",
-      "vision": true,
-      "generate": true,
-      "priority": 1
-    },
-    {
-      "name": "OpenAI",
+      "name": "GPT Channel",
       "base_url": "https://api.openai.com",
-      "api_key": "",
+      "api_key": "sk-your-api-key-here",
       "model": "gpt-4o",
       "image_model": "gpt-image-2",
       "image_api_key": "",
       "image_base_url": "",
       "vision": true,
       "generate": true,
+      "priority": 1
+    },
+    {
+      "name": "Local Proxy",
+      "base_url": "http://localhost:8080",
+      "api_key": "sk-local-proxy-key",
+      "model": "gpt-4o",
+      "image_model": "",
+      "image_api_key": "",
+      "image_base_url": "",
+      "vision": true,
+      "generate": false,
       "priority": 2
     },
     {
-      "name": "Ollama Local",
+      "name": "Ollama",
       "base_url": "http://localhost:11434",
       "api_key": "ollama",
       "model": "llava:latest",

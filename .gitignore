@@ -1,0 +1,16 @@
+# User config with real API keys
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+output/
+*.png
+*.jpg
