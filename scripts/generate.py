@@ -35,7 +35,7 @@ DEFAULT_SIZE = "1024x1024"
 DEFAULT_QUALITY = "medium"
 DEFAULT_FORMAT = "png"
 DEFAULT_COUNT = 1
-DEFAULT_AUTO_TIMEOUT = 300
+DEFAULT_AUTO_TIMEOUT = 360
 MIN_TIMEOUT = 180
 MAX_TIMEOUT = 600
 
@@ -525,14 +525,16 @@ def resolve_timeout(size_str, has_ref=False, override=None):
     if not m:
         return DEFAULT_AUTO_TIMEOUT
     pixels = int(m.group(1)) * int(m.group(2))
+    # gpt-image-2 real-world latency: 1024x1024 medium ~80s, high ~195s
+    # Add 60-90s headroom for relay proxy/gateway/CDN overhead
     if pixels <= 1_200_000:
-        t = 180
+        t = 220   # was 180 — too tight for 1024x1024 through relay
     elif pixels <= 2_400_000:
-        t = 240
+        t = 300   # was 240
     elif pixels <= 4_500_000:
-        t = 360
+        t = 420   # was 360
     else:
-        t = 540
+        t = 600   # 4K ceiling
     if has_ref:
         t += 60
     return min(MAX_TIMEOUT, max(MIN_TIMEOUT, t))
@@ -573,7 +575,12 @@ def _post_json(url, payload, headers, timeout):
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+        raw = resp.read().decode("utf-8", errors="replace")
+        result = json.loads(raw)
+        # Attach response headers so retry logic can read Retry-After
+        if hasattr(resp, 'headers'):
+            result['_response_headers'] = dict(resp.headers)
+        return result
 
 
 def _build_multipart_body(fields, files):
@@ -648,14 +655,29 @@ def _run_with_retries(label, func, max_attempts, base_delay, cooldown, verbose):
             # Never retry permanent 4xx (400, 401, 402, 403, 404, 405, 410, 413, 414, 415, 422)
             if exc.code in PERMANENT_4XX:
                 raise last_error
+            # For 429, check Retry-After header for the backoff seed
+            if exc.code == 429:
+                retry_after = exc.headers.get('Retry-After') if hasattr(exc, 'headers') else None
+                if retry_after:
+                    try:
+                        delay = int(retry_after)
+                    except ValueError:
+                        delay = None
+                    if delay:
+                        _progress(f"{label}: rate limited, Retry-After={delay}s", verbose=verbose)
+                        time.sleep(delay)
+                        continue  # Don't count as attempt, try immediately after delay
             # Only retry on transient errors: 408, 409, 425, 429, 5xx
             if exc.code not in RETRY_STATUS_CODES or attempt == max_attempts:
                 raise last_error
         except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
             last_error = RequestFailure(f"{label} network error: {exc}", attempts=attempt)
             _progress(f"{label}: network error", verbose=verbose)
+            # Network errors on 200s+ latency providers are often mid-link timeouts
+            # (proxy/CDN/gateway dropping the connection before OpenAI finishes).
+            # Retry with backoff but log clearly so user can tune --timeout up.
             if attempt == max_attempts:
-                raise last_error
+                raise
         except json.JSONDecodeError as exc:
             last_error = RequestFailure(f"{label} invalid JSON: {exc}", attempts=attempt)
             _progress(f"{label}: invalid JSON", verbose=verbose)
