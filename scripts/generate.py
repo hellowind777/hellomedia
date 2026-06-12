@@ -1210,7 +1210,7 @@ def main():
         f"start generation: images_model={params['images_model']}, responses_model={params['responses_model']}, "
         f"chat_model={params['chat_model']}, size={size}, quality={quality}, endpoint_mode={args.endpoint_mode}, "
         f"count={args.count}",
-        enabled=verbose,
+        verbose=verbose,
     )
 
     for attempt in range(retry_count + 1):
@@ -1220,7 +1220,7 @@ def main():
 
         try:
             for idx, output_path in enumerate(output_paths, start=1):
-                _progress(f"generating image {idx}/{len(output_paths)} -> {output_path}", enabled=verbose)
+                _progress(f"generating image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
                 image_bytes, transport, attempts, trace = generate_image(
                     base_url=_normalize_base_url(params["base_url"]),
                     api_key=params["api_key"],
@@ -1261,7 +1261,7 @@ def main():
                 any_fallback = any_fallback or any(
                     t.get("status") == "fallback" for t in trace
                 )
-                _progress(f"saved image {idx}/{len(output_paths)} -> {output_path}", enabled=verbose)
+                _progress(f"saved image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
 
             # All images generated successfully
             elapsed = round(time.time() - started, 2)
