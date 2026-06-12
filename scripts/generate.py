@@ -29,7 +29,7 @@ RUNTIME_DIR = SKILL_DIR / ".runtime"
 
 DEFAULT_BASE_URL = "https://api.openai.com"
 DEFAULT_IMAGES_MODEL = "gpt-image-2"
-DEFAULT_RESPONSES_MODEL = "gpt-5-1"
+DEFAULT_RESPONSES_MODEL = "gpt-5"
 DEFAULT_CHAT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "1024x1024"
 DEFAULT_QUALITY = "medium"
@@ -575,12 +575,7 @@ def _post_json(url, payload, headers, timeout):
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        result = json.loads(raw)
-        # Attach response headers so retry logic can read Retry-After
-        if hasattr(resp, 'headers'):
-            result['_response_headers'] = dict(resp.headers)
-        return result
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
 def _build_multipart_body(fields, files):
@@ -677,7 +672,7 @@ def _run_with_retries(label, func, max_attempts, base_delay, cooldown, verbose):
             # (proxy/CDN/gateway dropping the connection before OpenAI finishes).
             # Retry with backoff but log clearly so user can tune --timeout up.
             if attempt == max_attempts:
-                raise
+                raise last_error
         except json.JSONDecodeError as exc:
             last_error = RequestFailure(f"{label} invalid JSON: {exc}", attempts=attempt)
             _progress(f"{label}: invalid JSON", verbose=verbose)
@@ -1045,7 +1040,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
             total_attempts += exc.attempts or 0
             last_error = exc
             # Stop on permission/auth failures for non-official endpoints
-            if exc.status in {401, 403} and not is_openai:
+            if exc.status in {401, 402, 403} and not is_openai:
                 raise
             trace.append({"endpoint": ep, "status": "fallback",
                           "attempts": exc.attempts, "error": str(exc)})
@@ -1132,7 +1127,7 @@ def main():
 
     verbose = not args.quiet
     channels, defaults = load_channels()
-    timeout_override = args.timeout or defaults.get("timeout_seconds", 300)
+    timeout_override = args.timeout or defaults.get("timeout_seconds")
     retry_count = args.retry_count or defaults.get("retry_count", 2)
     max_resolution = normalize_resolution(
         args.max_resolution or defaults.get("max_resolution", "2k"))
@@ -1150,8 +1145,8 @@ def main():
         ch = targets[0]
         params = resolve_channel_params(ch)
         # ---- Determine effective timeout ----
-        _size = args.size or "1024x1024"
-        _timeout = resolve_timeout(_size, has_ref=bool(args.image), override=timeout_override)
+        _size = args.size or "auto"
+        _timeout = "auto (will be computed at runtime)" if _size == "auto" else resolve_timeout(_size, has_ref=bool(args.image), override=timeout_override)
         preview = {
             "ok": True,
             "dry_run": True,
@@ -1321,7 +1316,7 @@ def main():
                               "status": "failed", "error": str(exc)})
             _progress(f"batch attempt {attempt} failed: {exc}", verbose=verbose)
             # Don't retry batch on permission errors for non-OpenAI
-            if exc.status in {401, 403} and not _is_official_openai(_normalize_base_url(params["base_url"])):
+            if exc.status in {401, 402, 403} and not _is_official_openai(_normalize_base_url(params["base_url"])):
                 break
 
     # All retries exhausted
