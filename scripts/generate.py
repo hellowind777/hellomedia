@@ -1149,6 +1149,9 @@ def main():
     if args.dry_run:
         ch = targets[0]
         params = resolve_channel_params(ch)
+        # ---- Determine effective timeout ----
+        _size = args.size or "1024x1024"
+        _timeout = resolve_timeout(_size, has_ref=bool(args.image), override=timeout_override)
         preview = {
             "ok": True,
             "dry_run": True,
@@ -1164,15 +1167,15 @@ def main():
             "max_resolution": max_resolution,
             "quality": args.quality,
             "format": args.format,
-            "timeout_seconds": timeout_override,
+            "timeout_seconds": _timeout,
             "retry_count": retry_count,
             "cooldown": cooldown,
-            "count": args.count,
             "layout_analysis": layout_analysis,
             "image_refs": args.image,
+            "count": args.count,
         }
         print(json.dumps(preview, ensure_ascii=False, indent=2))
-        return
+        return  # after dry-run
 
     has_ref = bool(args.image)
     image_refs = list(args.image) if args.image else None
