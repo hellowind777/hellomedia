@@ -6,6 +6,10 @@
 
 ---
 
+> 🏅 This project is linked & recognized by the [LINUX DO](https://linux.do) community.
+
+---
+
 ## English
 
 A Claude Code skill that routes visual understanding and image generation tasks to configured multimodal models when the default model lacks these capabilities.
@@ -112,3 +116,7 @@ python scripts/generate.py --prompt "一张施工安全信息图" --output ./cha
 ### 许可证
 
 Apache 2.0 — 详见 [LICENSE](./LICENSE)
+
+---
+
+> 🏅 此项目已链接认可 [LINUX DO](https://linux.do) 社区。
