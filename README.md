@@ -1,7 +1,7 @@
 # HelloMultimodal
 
-> Visual understanding and image generation skill for Claude Code with multi-channel fallback.
-> **v0.2.2**
+> Visual understanding & image generation skill for Claude Code. Multi-channel fallback via config.json.
+> **v0.2.0**
 
 [English](#english) | [中文](#中文)
 
@@ -13,163 +13,147 @@
 
 ## English
 
-HelloMultimodal routes vision and image-generation tasks to configured multimodal providers when the active Claude Code session model cannot do them well or cannot do them at all.
-
-### The key limitation
-
-If your current Claude Code chat model does **not** support image input, an image attached directly in chat can fail **before the skill is invoked**.
-
-Typical error:
-
-```text
-No endpoints found that support image input
-```
-
-That means the fix is **not** "improve fallback after attachment". The fix is to avoid chat attachments for non-vision session models and use one of these inputs instead:
-
-1. local image path
-2. image directory
-3. Windows clipboard screenshot
+A Claude Code skill that routes visual understanding and image generation tasks to configured multimodal models when the default model lacks these capabilities. Fully self-contained — zero external dependencies, one config.json, runs anywhere.
 
 ### Features
 
-#### Vision analysis
+#### Visual Understanding
+- Single image analysis: screenshots, diagrams, embedded images, documents
+- Batch image analysis via directory scan
+- Multi-channel auto-fallback by priority
+- Capability-probe routing based on actual API response, not model name (proxy-mapping safe)
 
-- Single image analysis from a local file path
-- Batch analysis from a directory
-- Windows clipboard screenshot ingestion via `--clipboard`
-- Multi-channel fallback by configured priority
-- Structured JSON result with `_assistant_text` extracted when available
-- Retry only on retryable transport / rate / server failures
-
-#### Image generation
-
-- Multi-endpoint fallback in `generate.py`
-- Reference-image editing
-- Multi-image generation
-- `gpt-image-2` options such as `--thinking` and `--seed`
+#### Image Generation (via `generate.py`)
+- **4-endpoint auto-fallback**: `responses` → `images` → `images-edits` → `chat`
+- **Double payload degradation within each endpoint**: full-format → minimal fallback
+- **Dual URL variant probing**: `/v1/...` → plain path for local proxy compatibility
+- **Semantic layout analysis**: auto-selects optimal canvas ratio via lightweight LLM call when no explicit size/ratio is given
+- **gpt-image-2 native features**: `--thinking` reasoning budget (off/low/medium/high), `--seed` for semi-deterministic output
+- **Reference image editing**: multipart → JSON auto-fallback via responses / images-edits / chat
+- **Multi-image generation**: `--count N` serial generation with per-image independent timeout
+- **Adaptive sizing**: honors prompt-declared size, aspect ratio, or auto-infers via complexity heuristic
+- **Cross-request cooldown**: prevents rate-limit cascading
+- **Permanent error fast-fail**: 400/401/403 etc. fail immediately without wasting retries
+- **Structured JSON output**: machine-readable results with full attempt trace
 
 #### General
+- All standard library only — no pip install required
+- Cross-channel API key isolation (`image_api_key` / `api_key` separation)
+- Retry with exponential backoff + jitter per channel
+- Configurable timeout (auto-scaled by output resolution)
 
-- Standard library only for `vision.py`
-- One `config.json`
-- Works well with proxy / relay providers
-
-### Quick start
+### Quick Start
 
 ```bash
 # 1. Copy template config
 cp config.example.json config.json
 
-# 2. Fill in your credentials
-# 3. Link into Claude Code
+# 2. Edit config.json with your API credentials
+# 3. Link to Claude Code
 ln -s "$(pwd)" ~/.claude/skills/hello-multimodal
 ```
 
 ### Usage
 
-#### Vision analysis
+#### Vision Analysis
 
 ```bash
-# Single local image
-python scripts/vision.py --image "./screenshot.png" --prompt "Describe this UI"
+# Single image
+python scripts/vision.py --image screenshot.png --prompt "Describe this UI"
 
-# Directory of images
-python scripts/vision.py --image-dir "./pages" --prompt "Extract key info from each page"
+# Batch analysis
+python scripts/vision.py --image-dir ./pages/ --prompt "Extract key info from each page"
 
-# Windows clipboard screenshot
-python scripts/vision.py --clipboard --prompt "Describe the screenshot I just copied"
-
-# Force a specific channel priority
-python scripts/vision.py --channel 2 --image "./img.png" --prompt "..."
+# Force specific channel
+python scripts/vision.py --channel 2 --image ./img.png --prompt "..."
 ```
 
-#### Recommended Claude Code skill invocations
-
-```text
-/hello-multimodal "D:\shots\bug.png" "Analyze this error screenshot"
-/hello-multimodal "dir:D:\pages" "Review these page captures one by one"
-/hello-multimodal "clipboard" "Check the screenshot I just copied"
-```
-
-#### Important: what not to do on non-vision chat models
-
-Do **not** attach an image directly into the chat if your current session model lacks image support. The request can fail before Claude gets a chance to route to this skill.
-
-Use a file path, `dir:<folder>`, or `clipboard` instead.
-
-#### Image generation
+#### Image Generation
 
 ```bash
 # Basic text-to-image
-python scripts/generate.py --prompt "A construction safety infographic" --output "./chart.png"
+python scripts/generate.py --prompt "A construction safety infographic" --output ./chart.png
 
 # Long prompt from file
-python scripts/generate.py --prompt-file "./prompts/design.txt" --output "./design.png"
+python scripts/generate.py --prompt-file ./prompts/design.txt --output ./design.png
+
+# Prompt from stdin
+cat ./prompts/scene.txt | python scripts/generate.py --prompt - --output ./scene.png
 
 # Generate multiple images
-python scripts/generate.py --prompt "fantasy creature concept" --count 3 --output "./creature.png"
+python scripts/generate.py --prompt "fantasy creature concept" --count 3 --output ./creature.png
 
-# Reference image editing
-python scripts/generate.py --prompt "turn this sketch into a polished poster" --image "./sketch.png" --output "./poster.png"
+# With reference image (editing / variation)
+python scripts/generate.py --prompt "turn this sketch into a polished poster" --image ./sketch.png --output ./poster.png
 
-# gpt-image-2 thinking mode
-python scripts/generate.py --prompt "technical chart with precise labels and data" --thinking medium --output "./chart.png"
+# gpt-image-2 thinking mode for complex compositing
+python scripts/generate.py --prompt "technical chart with precise labels and data" --thinking medium --output ./chart.png
+
+# Deterministic output with seed
+python scripts/generate.py --prompt "a cat in a spacesuit" --seed 42 --output ./cat.png
+
+# Force specific endpoint (rarely needed — auto is sufficient)
+python scripts/generate.py --prompt "..." --endpoint-mode responses --output ./img.png
+
+# 4K resolution ceiling (requires 4K-capable provider)
+python scripts/generate.py --prompt "panoramic landscape" --max-resolution 4k --output ./wide.png
+
+# Dry-run to inspect configuration
+python scripts/generate.py --prompt "test" --dry-run
+
+# Quiet mode for scripting
+python scripts/generate.py --quiet --prompt "..." --output ./img.png
 ```
 
-### Routing rules
+### Routing Rules
 
-| Task | Session model supports vision | Session model does not support vision |
-|------|-------------------------------|----------------------------------------|
-| Vision understanding | Session model may handle it directly | Use hello-multimodal with path / dir / clipboard |
-| Image generation | Always hello-multimodal | Always hello-multimodal |
+| Task | Main Model Has Capability | Main Model Lacks Capability |
+|------|--------------------------|---------------------------|
+| Visual Understanding | Main model handles directly | → hello-multimodal |
+| Image Generation | → Always hello-multimodal | → hello-multimodal |
 
 ### Configuration
 
-See `config.example.json`.
+See `config.example.json` for channel templates. Each channel supports:
 
 | Field | Description |
-|-------|-------------|
+|-------|------------|
 | `api_key` / `image_api_key` | Separate credentials for vision vs generation |
 | `model` / `image_model` | Different models for different tasks |
-| `vision` / `generate` | Enable capabilities per channel |
-| `priority` | Lower value = tried first |
+| `responses_model` / `chat_model` | Model overrides for /v1/responses and /v1/chat fallback |
+| `vision` / `generate` | Enable/disable capabilities per channel |
+| `priority` | Lower = tried first, auto-fallback on failure |
 
-### Repository layout
+### Repository Layout
 
 ```text
 hello-multimodal/
-├── SKILL.md
+├── SKILL.md              # Skill definition for Claude Code
 ├── README.md
 ├── LICENSE
-├── config.example.json
-├── config.json
+├── config.example.json   # Template — copy to config.json
+├── config.json           # Your credentials (gitignored)
 ├── .gitignore
 └── scripts/
-    ├── vision.py
-    ├── generate.py
-    └── export_clipboard_image.ps1
+    ├── vision.py         # Vision analysis engine
+    └── generate.py       # Self-contained image generation engine
 ```
 
 ### Changelog
 
-#### v0.2.2
-
-- clarified the core limitation: chat image attachments can fail before skill routing on non-vision session models
-- added path / directory / clipboard guidance to the skill itself
-- added `vision.py --clipboard`
-- added Windows clipboard export helper
-- changed `vision.py` to stay standard-library-only
-- improved retry behavior to retry only retryable failures
-- extracted `_assistant_text` from successful vision responses
-
 #### v0.2.0
+- `generate.py`: gpt-image-2 native `--thinking` and `--seed` support
+- `generate.py`: permanent 4xx fast-fail (no wasted retries)
+- `generate.py`: `tool_choice: "auto"` for 2026 Responses API compatibility
+- `generate.py`: `--count` multi-image serial generation
+- `generate.py`: `--endpoint-mode`, `--responses-mode`, `--dry-run`, `--quiet`
+- `generate.py`: semantic layout analysis with `--layout-analysis` / `--layout-min-confidence`
+- `generate.py`: dual URL variant probing (v1 + plain) for local proxy compatibility
+- `SKILL.md`: LLM-friendly decision guide for parameter selection
+- `README.md`: comprehensive usage examples covering all features
 
-- `generate.py`: gpt-image-2 native `--thinking` and `--seed`
-- `generate.py`: permanent 4xx fast-fail
-- `generate.py`: `--count`, `--endpoint-mode`, `--responses-mode`, `--dry-run`, `--quiet`
-- semantic layout analysis
-- dual URL probing for proxy compatibility
+#### v0.1.0
+- Initial release: visual understanding + image generation via config.json channels
 
 ### License
 
@@ -179,49 +163,34 @@ Apache 2.0 — see [LICENSE](./LICENSE)
 
 ## 中文
 
-HelloMultimodal 用来把看图和生图任务路由到你在 `config.json` 里配置的多模态渠道，尤其适合当前 Claude Code 会话模型没有视觉能力，或者代理映射把视觉能力弄丢的场景。
-
-### 先看核心限制
-
-如果当前 Claude Code 会话模型**不支持图片输入**，你把图片直接作为聊天附件发出去，失败会发生在**技能触发之前**。
-
-典型报错：
-
-```text
-No endpoints found that support image input
-```
-
-所以这个问题的关键不是“附件失败后再 fallback 到技能”，而是：
-
-**非视觉会话模型下，不要直接发聊天附件图。**
-
-改用下面三种输入：
-
-1. 本地图片路径
-2. 图片目录
-3. Windows 剪贴板截图
+一个 Claude Code 技能，当默认模型不具备视觉理解或图片生成能力时，自动路由到配置的多模态模型。**完全自包含——零外部依赖，一个 config.json，随处可跑。**
 
 ### 功能
 
 #### 视觉理解
+- 单图分析：截图、流程图、嵌入图片、文档
+- 批量图片分析（目录扫描）
+- 多渠道按优先级自动 fallback
+- 基于实际 API 响应而非模型名称的能力探测路由（代理映射安全）
 
-- 支持本地单图分析
-- 支持目录批量分析
-- 支持 Windows 剪贴板截图 `--clipboard`
-- 按 `priority` 自动切换视觉渠道
-- 成功结果会尽量提取 `_assistant_text`
-- 只在可重试错误上重试，不再无效重试
-
-#### 图片生成
-
-- 继续使用 `generate.py` 的多端点 fallback
-- 支持参考图编辑、多图生成、`--thinking`、`--seed`
+#### 图片生成（`generate.py`）
+- **4 端点自动 fallback**：`responses` → `images` → `images-edits` → `chat`
+- **每端点内双层 payload 降级**：完整格式 → 最小回退
+- **双 URL variant 探路**：`/v1/...` → 裸路径，兼容本地代理
+- **语义画幅分析**：无显式尺寸/比例时自动通过轻量 LLM 调用选最优画幅
+- **gpt-image-2 原生特性**：`--thinking` 推理预算（off/low/medium/high），`--seed` 半确定性输出
+- **参考图编辑**：multipart → JSON 自动回退（responses / images-edits / chat）
+- **多图生成**：`--count N` 串行生成，每张独立 timeout
+- **自适应尺寸**：优先 prompt 显式尺寸，其次比例，最后启发式推断
+- **跨请求冷却**：防止限流雪崩
+- **永久性错误快速失败**：400/401/403 等立即失败不浪费重试
+- **结构化 JSON 输出**：机器可读结果含完整 attempt trace
 
 #### 通用
-
-- `vision.py` 保持纯标准库
-- 一个 `config.json` 即可运行
-- 兼容代理 / 中继渠道
+- 纯标准库，无需 pip install
+- 跨渠道密钥隔离（`image_api_key` / `api_key` 分离）
+- 指数退避 + jitter 重试
+- 可配置超时（按输出分辨率自动缩放）
 
 ### 快速开始
 
@@ -229,7 +198,7 @@ No endpoints found that support image input
 # 1. 复制模板配置
 cp config.example.json config.json
 
-# 2. 填入你的凭据
+# 2. 编辑 config.json 填入你的 API 凭据
 # 3. 链接到 Claude Code
 ln -s "$(pwd)" ~/.claude/skills/hello-multimodal
 ```
@@ -240,110 +209,89 @@ ln -s "$(pwd)" ~/.claude/skills/hello-multimodal
 
 ```bash
 # 单图
-python scripts/vision.py --image "./screenshot.png" --prompt "描述这张界面"
+python scripts/vision.py --image screenshot.png --prompt "描述这张UI"
 
-# 目录批量分析
-python scripts/vision.py --image-dir "./pages" --prompt "逐张提取关键信息"
+# 批量分析
+python scripts/vision.py --image-dir ./pages/ --prompt "从每页提取关键信息"
 
-# Windows 剪贴板截图
-python scripts/vision.py --clipboard --prompt "描述我刚复制的截图"
-
-# 强制指定某个 priority 渠道
-python scripts/vision.py --channel 2 --image "./img.png" --prompt "..."
+# 指定渠道
+python scripts/vision.py --channel 2 --image ./img.png --prompt "..."
 ```
-
-#### 在 Claude Code 里推荐这样调用技能
-
-```text
-/hello-multimodal "D:\shots\bug.png" "帮我分析这张报错截图"
-/hello-multimodal "dir:D:\pages" "把这些页面截图逐张分析"
-/hello-multimodal "clipboard" "看看我刚复制的截图有什么问题"
-```
-
-#### 非视觉会话模型下不要这样用
-
-不要把图片直接作为聊天附件发送给当前会话。
-
-因为一旦当前会话模型不支持图片输入，请求会先报错，技能来不及接管。
-
-正确做法是改传：
-
-- 图片路径
-- `dir:目录`
-- `clipboard`
 
 #### 图片生成
 
 ```bash
 # 基本文生图
-python scripts/generate.py --prompt "一张施工安全信息图" --output "./chart.png"
+python scripts/generate.py --prompt "一张施工安全信息图" --output ./chart.png
 
 # 从文件读取长 prompt
-python scripts/generate.py --prompt-file "./prompts/design.txt" --output "./design.png"
+python scripts/generate.py --prompt-file ./prompts/design.txt --output ./design.png
 
-# 多图生成
-python scripts/generate.py --prompt "幻想生物概念图" --count 3 --output "./creature.png"
+# 从 stdin 读取 prompt
+cat ./prompts/scene.txt | python scripts/generate.py --prompt - --output ./scene.png
+
+# 生成多张图片
+python scripts/generate.py --prompt "幻想生物概念图" --count 3 --output ./creature.png
 
 # 参考图编辑
-python scripts/generate.py --prompt "把这张草图变成精致海报" --image "./sketch.png" --output "./poster.png"
+python scripts/generate.py --prompt "把这张草图变成精致的海报" --image ./sketch.png --output ./poster.png
 
-# gpt-image-2 推理模式
-python scripts/generate.py --prompt "带精确标签和数据的图表" --thinking medium --output "./chart.png"
+# gpt-image-2 推理模式（复杂合成）
+python scripts/generate.py --prompt "带有精确标签和数据的图表" --thinking medium --output ./chart.png
+
+# 确定性输出
+python scripts/generate.py --prompt "穿宇航服的猫" --seed 42 --output ./cat.png
+
+# 强制指定端点（极少需要，auto 已足够）
+python scripts/generate.py --prompt "..." --endpoint-mode responses --output ./img.png
+
+# 4K 分辨率上限
+python scripts/generate.py --prompt "全景风景" --max-resolution 4k --output ./wide.png
+
+# 调试配置
+python scripts/generate.py --prompt "test" --dry-run
+
+# 脚本静默模式
+python scripts/generate.py --quiet --prompt "..." --output ./img.png
 ```
 
 ### 路由规则
 
-| 任务 | 会话模型支持视觉 | 会话模型不支持视觉 |
-|------|------------------|--------------------|
-| 看图 | 可直接由会话模型处理 | 用 hello-multimodal，输入改为路径 / 目录 / clipboard |
-| 生图 | 始终 hello-multimodal | 始终 hello-multimodal |
-
-### 配置
-
-参考 `config.example.json`。
-
-| 字段 | 说明 |
-|------|------|
-| `api_key` / `image_api_key` | 视觉与生图可分开配置凭据 |
-| `model` / `image_model` | 不同任务可用不同模型 |
-| `vision` / `generate` | 是否启用该能力 |
-| `priority` | 越小越优先 |
+| 需求 | 主模型有能力 | 主模型无能力 |
+|------|------------|------------|
+| 视觉理解 | 主模型直接处理 | → hello-multimodal |
+| 图片生成 | → 始终 hello-multimodal | → hello-multimodal |
 
 ### 仓库结构
 
 ```text
 hello-multimodal/
-├── SKILL.md
+├── SKILL.md              # Claude Code 技能定义
 ├── README.md
 ├── LICENSE
-├── config.example.json
-├── config.json
+├── config.example.json   # 模板——复制为 config.json
+├── config.json           # 你的凭据（已 gitignored）
 ├── .gitignore
 └── scripts/
-    ├── vision.py
-    ├── generate.py
-    └── export_clipboard_image.ps1
+    ├── vision.py         # 视觉理解引擎
+    └── generate.py       # 独立生图引擎
 ```
 
-### 更新记录
-
-#### v0.2.2
-
-- 明确说明了核心限制：非视觉会话模型下，聊天附件图可能在技能路由前直接失败
-- 在技能说明里加入 路径 / 目录 / clipboard 三种可执行入口
-- 新增 `vision.py --clipboard`
-- 新增 Windows 剪贴板导出脚本
-- `vision.py` 改为纯标准库实现
-- 重试逻辑改为只对可重试错误生效
-- 成功结果自动补充 `_assistant_text`
+### Changelog
 
 #### v0.2.0
+- `generate.py`：gpt-image-2 原生 `--thinking` 和 `--seed` 支持
+- `generate.py`：永久性 4xx 快速失败（不浪费重试）
+- `generate.py`：`tool_choice: "auto"` 兼容 2026 Responses API
+- `generate.py`：`--count` 多图串行生成
+- `generate.py`：`--endpoint-mode`、`--responses-mode`、`--dry-run`、`--quiet`
+- `generate.py`：语义画幅分析（`--layout-analysis` / `--layout-min-confidence`）
+- `generate.py`：双 URL variant 探路（v1 + plain）兼容本地代理
+- `SKILL.md`：LLM 友好的参数决策指南
+- `README.md`：覆盖所有功能的完整使用示例
 
-- `generate.py` 支持 `gpt-image-2` 原生 `--thinking`、`--seed`
-- 持久 4xx 快速失败
-- 支持 `--count`、`--endpoint-mode`、`--responses-mode`、`--dry-run`、`--quiet`
-- 语义画幅分析
-- 双 URL 探路兼容代理
+#### v0.1.0
+- 初始版本：视觉理解 + 图片生成，通过 config.json 多渠道调度
 
 ### 许可证
 
