@@ -1,175 +1,110 @@
 ---
 name: hello-multimodal
-description: "视觉理解 & 图片生成。触发条件：1) 生图需求始终用此技能(所有文本模型均无法生图)。2) 视觉理解优先尝试主模型，若主模型报错(不支持vision/代理映射导致能力缺失/返回格式错误)则fallback到此技能。3) 用户明确要求使用此技能时直接调用。适用：分析截图、理解流程图、描述嵌入图片、生成配图、文档图片理解、代理映射场景下的视觉任务。"
+description: "视觉理解与图片生成。生图始终用此技能；看图时，如果当前会话模型不支持视觉、代理映射丢失视觉能力，或用户明确要求用 hello-multimodal，就改走本技能。对非视觉会话模型，不要让用户把图片直接作为聊天附件发送；改用本地图片路径、目录，或 Windows 剪贴板截图。"
+argument-hint: "[image-path|dir:<folder>|clipboard|gen] [prompt]"
+allowed-tools: Read Bash(python *) Bash(python3 *) Bash(py *) Bash(powershell *)
 ---
 
 # HelloMultimodal
 
-## 路由规则（基于实际能力探测，非模型名匹配）
+当前调用参数：$ARGUMENTS
 
+## 先看这个限制
+
+如果当前 Claude Code 会话模型**不支持视觉**，用户把图片直接作为聊天附件发送时，报错会发生在**技能路由之前**，常见错误：
+
+```text
+No endpoints found that support image input
 ```
+
+这时 hello-multimodal **没有机会自动接管这张附件图**。正确做法不是继续重试附件，而是改成下面三种入口之一：
+
+1. **本地图片路径**：`D:\path\to\image.png`
+2. **图片目录**：`dir:D:\path\to\pages`
+3. **Windows 剪贴板截图**：先截图到剪贴板，再用 `clipboard`
+
+## 路由规则
+
+```text
 生图需求 → 始终用此技能
-         （任何文本模型均无原生生图能力）
 
-视觉理解 → 先试主模型
-           ├── 成功 → 完成
-           └── 失败(不支持/代理映射/格式错误) → fallback 到此技能
+视觉理解
+  ├─ 当前会话模型支持视觉，且用户已成功发图 → 主模型可直接处理
+  └─ 当前会话模型不支持视觉 / 代理映射失效 / 已出现图片输入报错
+       → 改用 hello-multimodal
+       → 输入改为 路径 / 目录 / clipboard
 ```
 
-### 代理映射场景
+## 你执行此技能时怎么做
 
-如果当前模型名显示为 Opus，但实际是 DeepSeek 通过代理映射：
-- 主模型尝试视觉请求时会报错（`does not support images`）
-- Claude Code 检测到错误后自动 fallback 到 hello-multimodal
-- 用户也可直接说"用 hello-multimodal 看图"强制路由
+### A. 视觉理解
 
-### capability-probe 优于 name-match
+优先识别用户给的是哪种输入：
 
-- 不依赖模型名称判断能力（名称可能被代理伪造）
-- 以实际 API 返回结果为准
-- 失败时自动降级，无需用户干预
+- 单图路径：如 `D:\shots\ui.png`
+- 目录：形如 `dir:D:\shots`
+- 剪贴板：`clipboard`
 
-## 配置 (config.json)
-
-```json
-{
-  "channels": [
-    {
-      "name": "hi-code GPT-5.4",
-      "base_url": "https://api-cn.hi-code.cc",
-      "api_key": "sk-...",
-      "model": "gpt-5.4",
-      "vision": true,
-      "generate": true,
-      "priority": 1
-    },
-    {
-      "name": "OpenAI GPT-4o",
-      "base_url": "https://api.openai.com",
-      "api_key": "sk-...",
-      "model": "gpt-4o",
-      "vision": true,
-      "generate": true,
-      "priority": 2
-    },
-    {
-      "name": "Ollama Local",
-      "base_url": "http://localhost:11434",
-      "api_key": "ollama",
-      "model": "llava:latest",
-      "vision": true,
-      "generate": false,
-      "priority": 3
-    }
-  ],
-  "defaults": {
-    "max_tokens": 4096,
-    "timeout_seconds": 300,
-    "retry_count": 2
-  }
-}
-```
-
-- `vision: true` = 此渠道可用于视觉理解
-- `generate: true` = 此渠道可用于图片生成
-- `priority` = 越小越优先，失败自动 fallback
-
-## 工作流
-
-### 视觉理解
+然后执行对应命令：
 
 ```bash
-python scripts/vision.py --image ./screenshot.png --prompt "描述图片内容"
-python scripts/vision.py --image-dir ./pages/ --prompt "批量分析"
+python "${CLAUDE_SKILL_DIR}/scripts/vision.py" --image "D:\path\to\image.png" --prompt "描述图片内容"
+python "${CLAUDE_SKILL_DIR}/scripts/vision.py" --image-dir "D:\path\to\pages" --prompt "逐张分析"
+python "${CLAUDE_SKILL_DIR}/scripts/vision.py" --clipboard --prompt "描述刚复制到剪贴板的截图"
 ```
 
-### 图片生成
+脚本会自动：
+
+- 按 `config.json` 里的 `priority` 依次尝试视觉渠道
+- 渠道失败时自动切下一个
+- 返回结构化 JSON
+- 在成功结果里附带 `_assistant_text`
+
+回答用户时：
+
+1. 优先使用 `_assistant_text`
+2. 若没有 `_assistant_text`，再从原始 JSON 的文本内容提炼结果
+3. 不把整段原始 API JSON 直接甩给用户，除非用户明确要原始响应
+
+### B. 图片生成
+
+生图始终走 `generate.py`：
 
 ```bash
-# Basic text-to-image
-python scripts/generate.py --prompt "施工质量评分雷达图" --output ./chart.png
-
-# Long prompt from file
-python scripts/generate.py --prompt-file ./prompts/design.txt --output ./design.png
-
-# Prompt from stdin
-cat ./prompts/scene.txt | python scripts/generate.py --prompt - --output ./scene.png
-
-# Generate multiple images
-python scripts/generate.py --prompt "fantasy monster concept" --count 3 --output ./monster.png
-
-# With reference image (editing / variation)
-python scripts/generate.py --prompt "turn this sketch into a polished poster" --image ./sketch.png --output ./poster.png
-
-# gpt-image-2 thinking mode for complex compositing
-python scripts/generate.py --prompt "technical diagram with labels" --thinking medium --output ./diagram.png
-
-# Deterministic output with seed
-python scripts/generate.py --prompt "a cat in a spacesuit" --seed 42 --output ./cat.png
-
-# Force specific endpoint
-python scripts/generate.py --prompt "..." --endpoint-mode responses --output ./img.png
-
-# Dry-run to inspect configuration
-python scripts/generate.py --prompt "test" --dry-run
-
-# Custom resolution ceiling (2k/4k)
-python scripts/generate.py --prompt "panoramic landscape" --max-resolution 4k --output ./wide.png
+python "${CLAUDE_SKILL_DIR}/scripts/generate.py" --prompt "施工质量评分雷达图" --output "./chart.png"
 ```
 
-### 指定渠道
+常见扩展：
 
 ```bash
-python scripts/vision.py --channel 2 --image ./img.png --prompt "..."
+python "${CLAUDE_SKILL_DIR}/scripts/generate.py" --prompt-file "./prompt.txt" --output "./design.png"
+python "${CLAUDE_SKILL_DIR}/scripts/generate.py" --prompt "fantasy monster concept" --count 3 --output "./monster.png"
+python "${CLAUDE_SKILL_DIR}/scripts/generate.py" --prompt "turn this sketch into a polished poster" --image "./sketch.png" --output "./poster.png"
+python "${CLAUDE_SKILL_DIR}/scripts/generate.py" --prompt "technical diagram with labels" --thinking medium --output "./diagram.png"
 ```
 
-## 规则
+## 用户直接调用本技能时的推荐写法
 
-- 按 priority 升序尝试渠道，失败自动下一个
-- 每个渠道重试 `retry_count` 次后切换到下一个
-- 所有渠道失败后输出错误详情
-- generate.py 完全自包含，零外部依赖
-
-### 生图默认行为（`auto` 模式覆盖绝大多数场景）
-
-generate.py 的 `--endpoint-mode auto`（默认）内部已经做了完整的多级 fallback，**通常你不需要手动指定任何参数**：
-
-```
-auto 模式内部 fallback 链（非 OpenAI 中继）：
-  images → responses → chat
-
-auto 模式内部 fallback 链（OpenAI 官方）：
-  responses → images
-
-每个端点内部：
-  full payload → minimal payload 降级
-  v1 路径 → plain 路径探路
+```text
+/hello-multimodal "D:\shots\error.png" "帮我分析这张报错截图"
+/hello-multimodal "dir:D:\pages" "逐张提取页面关键信息"
+/hello-multimodal "clipboard" "看看我刚复制的截图里有什么问题"
 ```
 
-### 何时手动指定 `--endpoint-mode`
+如果用户已经发了附件图，但当前会话模型不支持视觉：
 
-仅在以下场景手动干预：
+- 明确说明：**附件图这次无法被技能接管**
+- 引导用户改用上面三种入口之一
+- 不要假装已经看到那张附件
 
-| 场景 | 做法 |
-|------|------|
-| 生图请求，不需要特殊处理 | **不传 `--endpoint-mode`（默认 auto 足够）** |
-| 已知该中继只支持 `/v1/images/generations` | `--endpoint-mode images` |
-| 已知该中继只支持 `/v1/responses` | `--endpoint-mode responses` |
-| auto 模式所有端点都失败，想逐个排查 | 依次尝试 `--endpoint-mode images`、`--endpoint-mode responses`、`--endpoint-mode chat` 定位可用端点 |
-| 用户明确要求用特定端点 | 按用户要求传 |
-| 中继返回 401/403（权限错误） | auto 不会继续 fallback（避免烧 token），此时可**不传 `--endpoint-mode`，先检查 config.json 凭据** |
+## 配置说明（config.json）
 
-### 其他参数决策
+- `vision: true`：此渠道可用于视觉理解
+- `generate: true`：此渠道可用于图片生成
+- `priority`：数值越小越先尝试
 
-| 用户需求 | 参数 |
-|---------|------|
-| 生成一张图 | 基本用法，无需额外参数 |
-| 生成多张不同的图 | `--count N`（串行，每张独立 timeout） |
-| prompt 很长（>200 字） | `--prompt-file ./prompt.txt` 避免 CLI 转义问题 |
-| 有参考图做变体/编辑 | `--image ./ref.png`（可重复传多个） |
-| 复杂合成/精确标签/图表 | `--thinking medium` 或 `--thinking high`（gpt-image-2 推理预算） |
-| 需要可复现结果 | `--seed 42`（半确定性输出） |
-| 默认正方形不够好 | 不用手动传尺寸——`auto` 模式会自动从 prompt 提取比例（如 "16:9"），或触发 semantic layout analysis 选最优画幅 |
-| 想要更高分辨率 | `--max-resolution 4k`（默认 2k） |
-| 调试配置不实际请求 | `--dry-run` |
-| 减少进度日志输出 | `--quiet` |
+## 默认原则
+
+- 不依赖模型名判断视觉能力，优先看实际结果
+- 生图始终由此技能处理
+- 非视觉会话模型下，看图不要走聊天附件，走**路径 / 目录 / clipboard**

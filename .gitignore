@@ -15,3 +15,4 @@ output/
 *.png
 *.jpg
 .runtime/
+.helloagents/
