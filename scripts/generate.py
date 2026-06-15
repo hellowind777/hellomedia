@@ -39,6 +39,12 @@ DEFAULT_AUTO_TIMEOUT = 360
 MIN_TIMEOUT = 180
 MAX_TIMEOUT = 600
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 RETRY_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 # 4xx errors that should never be retried (permanent failures)
 PERMANENT_4XX = {400, 401, 402, 403, 404, 405, 410, 413, 414, 415, 422}
@@ -395,6 +401,7 @@ def _analyze_layout(prompt, base_url, api_key, model, verbose):
         "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
     }
 
     # Try chat API first (most compatible), then responses
@@ -568,6 +575,7 @@ def _request_headers(api_key):
         "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
     }
 
 
@@ -964,18 +972,80 @@ def _request_via_chat(base_url, api_key, model, prompt, image_refs, size, qualit
 
 
 # ============================================================================
+# SD WebUI (A1111) handler
+# ============================================================================
+def _request_via_sd_webui(base_url, prompt, image_refs, size, steps, cfg_scale,
+                          sampler, timeout, verbose):
+    """POST /sdapi/v1/txt2img or /sdapi/v1/img2img (Stable Diffusion WebUI)."""
+    m = re.match(r"(\d+)x(\d+)", size)
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (1024, 1024)
+
+    if image_refs:
+        endpoint = "/sdapi/v1/img2img"
+        ref_path = Path(image_refs[0]).expanduser()
+        ref_b64 = base64.b64encode(ref_path.read_bytes()).decode("ascii")
+        payload: dict[str, Any] = {
+            "init_images": [ref_b64],
+            "prompt": prompt,
+            "denoising_strength": 0.6,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "width": w,
+            "height": h,
+            "sampler_name": sampler,
+            "seed": -1,
+        }
+    else:
+        endpoint = "/sdapi/v1/txt2img"
+        payload = {
+            "prompt": prompt,
+            "negative_prompt": "",
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "width": w,
+            "height": h,
+            "sampler_name": sampler,
+            "seed": -1,
+        }
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    url = base_url.rstrip("/") + endpoint
+    body = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    images = data.get("images", [])
+    if not images:
+        raise RequestFailure("SD WebUI returned no images")
+    return base64.b64decode(images[0]), 1, endpoint.split("/")[-1]
+
+
+# ============================================================================
 # Multi-endpoint orchestrator
 # ============================================================================
 def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                    prompt, size, quality, fmt, timeout, max_attempts=3, base_delay=2.0,
                    cooldown=2.5, verbose=False, image_refs=None,
-                   endpoint_mode="auto", responses_mode="auto", seed=None, thinking=None):
+                   endpoint_mode="auto", responses_mode="auto", seed=None, thinking=None,
+                   sd_steps=30, sd_cfg_scale=7.5, sd_sampler="DPM++ 2M Karras"):
     """
     Generate one image through the optimal endpoint path.
     Returns (image_bytes, transport, total_attempts, trace).
     """
     trace: list[dict[str, Any]] = []
     is_openai = _is_official_openai(base_url)
+
+    # ---- SD WebUI shortcut ----
+    if endpoint_mode == "sd-webui":
+        image_bytes, attempts, mode = _request_via_sd_webui(
+            base_url, prompt, image_refs, size,
+            sd_steps, sd_cfg_scale, sd_sampler, timeout, verbose)
+        trace.append({"endpoint": f"sd-webui:{mode}", "attempts": attempts, "status": "success"})
+        return image_bytes, f"sd-webui:{mode}", attempts, trace
 
     # ---- Build ordered endpoint list ----
     if endpoint_mode == "images":
@@ -1104,10 +1174,13 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Generation seed for semi-deterministic output")
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="Number of images to generate")
     parser.add_argument("--image", action="append", default=None, help="Reference image path (repeatable)")
-    parser.add_argument("--endpoint-mode", choices=("auto", "images", "responses", "chat"), default="auto",
-                        help="Force specific endpoint protocol")
+    parser.add_argument("--endpoint-mode", choices=("auto", "images", "responses", "chat", "sd-webui"), default="auto",
+                        help="Force specific endpoint protocol (sd-webui for A1111 Stable Diffusion)")
     parser.add_argument("--responses-mode", choices=("auto", "stream", "json"), default="auto",
                         help="How /v1/responses should be consumed")
+    parser.add_argument("--sd-steps", type=int, default=30, help="SD WebUI sampling steps (default: 30)")
+    parser.add_argument("--sd-cfg-scale", type=float, default=7.5, help="SD WebUI CFG scale (default: 7.5)")
+    parser.add_argument("--sd-sampler", default="DPM++ 2M Karras", help="SD WebUI sampler name")
     parser.add_argument("--layout-analysis", choices=("auto", "off"), default="auto",
                         help="Use LLM to infer canvas ratio when prompt lacks explicit size/ratio")
     parser.add_argument("--layout-min-confidence", type=float, default=0.65,
@@ -1261,6 +1334,9 @@ def main():
                     responses_mode=args.responses_mode,
                     seed=seed,
                     thinking=thinking,
+                    sd_steps=args.sd_steps,
+                    sd_cfg_scale=args.sd_cfg_scale,
+                    sd_sampler=args.sd_sampler,
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_bytes(image_bytes)
