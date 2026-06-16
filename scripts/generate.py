@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+# Ensure UTF-8 on Windows — must be at module level before any print() call
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -151,6 +156,24 @@ def _build_output_paths(output_arg, count, fmt):
     resolved_parent = parent.resolve()
     resolved_parent.mkdir(parents=True, exist_ok=True)
     return [(resolved_parent / f"{stem}-{index}{suffix}").resolve() for index in range(1, count + 1)]
+
+
+def _validate_output_paths(paths):
+    """Reject output paths outside the project directory or skill runtime dir.
+    Returns (all_safe: bool, rejected: list)."""
+    cwd = Path.cwd().resolve()
+    runtime = (SKILL_DIR / ".runtime").resolve()
+    rejected = []
+    for p in paths:
+        p_str = str(p)
+        if not (p_str.startswith(str(cwd)) or p_str.startswith(str(runtime))):
+            rejected.append(str(p))
+        for frag in ("Desktop", "Downloads", "Documents", "OneDrive", "Pictures",
+                     "Music", "Videos", "Public"):
+            if frag.lower() in p_str.lower():
+                if str(p) not in rejected:
+                    rejected.append(str(p))
+    return len(rejected) == 0, rejected
 
 
 def _is_official_openai(base_url):
@@ -1246,7 +1269,7 @@ def main():
         return  # after dry-run
 
     has_ref = bool(args.image)
-    image_refs = list(args.image) if args.image else None
+    image_refs = [str(Path(p).resolve()).replace("\\", "/") for p in args.image] if args.image else None
     format_out = args.format
     seed = args.seed
     thinking = args.thinking
@@ -1279,6 +1302,12 @@ def main():
     quality = choose_quality(size, args.quality)
     timeout = resolve_timeout(size, has_ref=has_ref, override=timeout_override)
     output_paths = _build_output_paths(args.output, args.count, format_out)
+
+    # Validate output paths are safe (within project or skill runtime dir)
+    safe, rejected = _validate_output_paths(output_paths)
+    if not safe:
+        print(json.dumps({"error": f"Unsafe output path(s) rejected: {rejected}. Use a path within the project directory (e.g. ./output/)."}, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
 
     errors: list[str] = []
     all_trace: list[dict[str, Any]] = []

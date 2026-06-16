@@ -8,6 +8,11 @@ Zero external dependencies — stdlib only.
 import base64, json, os, sys, argparse, urllib.request, urllib.error, socket
 from pathlib import Path
 
+# Ensure UTF-8 on Windows — must be at module level before any print() call
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 SKILL_DIR = Path(__file__).parent.parent
 
 def load_channels():
@@ -127,6 +132,25 @@ def try_channel(channel, images, prompt, max_tokens, timeout):
         return _try_anthropic(channel, images, prompt, max_tokens, timeout)
     return _try_openai(channel, images, prompt, max_tokens, timeout)
 
+def _safe_output(output_path):
+    """Reject unsafe output paths (Desktop, absolute user dirs outside project).
+    Returns (is_safe: bool, resolved: Path | None)."""
+    if output_path == "-":
+        return True, None
+    p = Path(output_path).resolve()
+    cwd = Path.cwd().resolve()
+    runtime = (SKILL_DIR / ".runtime").resolve()
+    p_str = str(p)
+    if p_str.startswith(str(cwd)) or p_str.startswith(str(runtime)):
+        return True, p
+    # Reject common unsafe locations
+    for frag in ("Desktop", "Downloads", "Documents", "OneDrive", "Pictures",
+                 "Music", "Videos", "Public"):
+        if frag.lower() in p_str.lower():
+            return False, p
+    return False, p
+
+
 def main():
     parser = argparse.ArgumentParser(description="HelloMultimodal Vision Analysis")
     parser.add_argument("--image", help="Single image path")
@@ -141,13 +165,27 @@ def main():
     max_tokens = args.max_tokens or defaults.get("max_tokens", 4096)
     timeout = defaults.get("timeout_seconds", 300)
 
+    # Normalize paths: replace backslashes with forward slashes (survives shell escaping)
+    def _norm(p):
+        return str(Path(p).resolve()).replace("\\", "/") if p else None
+
     # Collect images
     images = []
-    if args.image: images.append(args.image)
+    missing = []
+    if args.image:
+        p = _norm(args.image)
+        if Path(p).exists():
+            images.append(p)
+        else:
+            missing.append(p)
     if args.image_dir:
+        dir_path = Path(_norm(args.image_dir))
         for ext in ("*.png","*.jpg","*.jpeg","*.bmp","*.tiff","*.webp","*.gif"):
-            images.extend(str(p) for p in Path(args.image_dir).glob(ext))
+            images.extend(str(p).replace("\\", "/") for p in dir_path.glob(ext))
         images.sort()
+    if missing:
+        print(json.dumps({"error": f"Image file(s) not found: {missing}"}, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
     if not images:
         print(json.dumps({"error": "No images provided"}), file=sys.stderr)
         sys.exit(1)
@@ -172,9 +210,13 @@ def main():
             if args.output == "-":
                 print(output)
             else:
-                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-                Path(args.output).write_text(output, encoding="utf-8")
-                print(f"Saved to {args.output}", file=sys.stderr)
+                safe, resolved = _safe_output(args.output)
+                if not safe:
+                    print(json.dumps({"error": f"Unsafe output path rejected: {args.output}. Output to stdout or a path within the project directory."}, ensure_ascii=False), file=sys.stderr)
+                    sys.exit(1)
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                resolved.write_text(output, encoding="utf-8")
+                print(f"Saved to {resolved}", file=sys.stderr)
             return
         errors.append(f"{label}: {result.get('error', 'unknown')}")
 
