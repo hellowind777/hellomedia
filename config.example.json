@@ -18,6 +18,8 @@
       "vision": true,
       "generate": true,
       "video": true,
+      "video_edit": true,
+      "video_extend": true,
       "audio": true,
       "priority": 1
     },

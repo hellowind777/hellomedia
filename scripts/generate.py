@@ -62,7 +62,21 @@ def _skill_version() -> str:
         return "0.0.0"
 
 
-USER_AGENT = f"hellomedia/{_skill_version()}"
+# Prefer shared browser UA (xAI imgen CDN); fall back if _common unavailable at import
+try:
+    from _common import resolve_media_user_agent as _resolve_media_ua  # type: ignore
+
+    USER_AGENT = _resolve_media_ua()
+except Exception:
+    try:
+        from scripts._common import resolve_media_user_agent as _resolve_media_ua  # type: ignore
+
+        USER_AGENT = _resolve_media_ua()
+    except Exception:
+        USER_AGENT = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        )
 
 RETRY_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 # 4xx errors that should never be retried (permanent failures)
@@ -74,8 +88,22 @@ OPENAI_SIZE_LIMITS = {
     "2k": {"max_width": 1536, "max_height": 1536, "max_pixels": 2_359_296},
     "4k": {"max_width": 3840, "max_height": 3840, "max_pixels": 8_847_360},
 }
-SEMANTIC_RATIO_OPTIONS = (
-    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+# Semantic layout ratios (prompt-side). Keep in sync with media_caps image aspects + layout extras.
+try:
+    from media_caps import IMAGE_ASPECT_RATIOS as _CAPS_IMAGE_RATIOS  # type: ignore
+except Exception:
+    try:
+        from scripts.media_caps import IMAGE_ASPECT_RATIOS as _CAPS_IMAGE_RATIOS  # type: ignore
+    except Exception:
+        _CAPS_IMAGE_RATIOS = (
+            "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+            "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "auto",
+        )
+_LAYOUT_EXTRA_RATIOS = ("4:5", "5:4", "21:9")
+SEMANTIC_RATIO_OPTIONS = tuple(
+    dict.fromkeys(
+        [r for r in _CAPS_IMAGE_RATIOS if r != "auto"] + list(_LAYOUT_EXTRA_RATIOS)
+    )
 )
 DEFAULT_SEMANTIC_RATIO = "1:1"
 
@@ -141,19 +169,60 @@ def _extract_image_source(payload):
     return None
 
 
-def _decode_image_bytes(source, timeout):
+def _decode_image_bytes(source, timeout, api_key=None, base_url=None):
+    """Fetch image bytes from b64 or remote URL (browser UA for xAI CDN)."""
     kind, value = source
     if kind == "b64":
         encoded = value.split(",", 1)[1] if value.startswith("data:image/") else value
         return base64.b64decode(encoded)
-    with urllib.request.urlopen(value, timeout=timeout) as resp:
+    # Prefer shared download helper (chunked + UA + optional same-host auth)
+    try:
+        from _common import download_url as _dl, resolve_media_user_agent as _rua
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="hm-img-")) / "dl.bin"
+        try:
+            _dl(
+                value,
+                tmp,
+                timeout=float(timeout or 120),
+                api_key=api_key,
+                base_url=base_url,
+            )
+            return tmp.read_bytes()
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+                tmp.parent.rmdir()
+            except OSError:
+                pass
+    except Exception:
+        pass
+    headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+    req = urllib.request.Request(value, headers=headers, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+_MAX_REF_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 def _image_to_data_url(path):
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Reference image not found: {p}")
+    try:
+        from _common import file_to_data_url as _ftd
+        return _ftd(str(p), max_bytes=_MAX_REF_IMAGE_BYTES)
+    except ImportError:
+        pass
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        raise ValueError(f"Cannot read reference image: {p}: {e}") from e
+    if size > _MAX_REF_IMAGE_BYTES:
+        raise ValueError(
+            f"Reference image too large ({size} bytes > {_MAX_REF_IMAGE_BYTES})"
+        )
     mime = mimetypes.guess_type(str(p))[0] or "image/png"
     encoded = base64.b64encode(p.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
@@ -173,20 +242,31 @@ def _build_output_paths(output_arg, count, fmt):
 
 
 def _validate_output_paths(paths):
-    """Reject output paths outside the project directory or skill runtime dir.
-    Returns (all_safe: bool, rejected: list)."""
-    cwd = Path.cwd().resolve()
-    runtime = (SKILL_DIR / ".runtime").resolve()
+    """Reject unsafe outputs using shared path rules (CWD / skill / .runtime)."""
+    try:
+        from _common import safe_output_path
+    except ImportError:
+        # Fallback if scripts/ not on path: still allow skill tree + cwd
+        from pathlib import Path as _P
+        skill = SKILL_DIR.resolve()
+        runtime = RUNTIME_DIR.resolve()
+        cwd = _P.cwd().resolve()
+
+        def safe_output_path(output_path):
+            p = _P(output_path).expanduser().resolve()
+            for root in (cwd, runtime, skill):
+                try:
+                    p.relative_to(root)
+                    return True, p
+                except ValueError:
+                    continue
+            return False, p
+
     rejected = []
     for p in paths:
-        p_str = str(p)
-        if not (p_str.startswith(str(cwd)) or p_str.startswith(str(runtime))):
+        ok, _ = safe_output_path(str(p))
+        if not ok:
             rejected.append(str(p))
-        for frag in ("Desktop", "Downloads", "Documents", "OneDrive", "Pictures",
-                     "Music", "Videos", "Public"):
-            if frag.lower() in p_str.lower():
-                if str(p) not in rejected:
-                    rejected.append(str(p))
     return len(rejected) == 0, rejected
 
 
@@ -766,13 +846,67 @@ def _run_with_retries(label, func, max_attempts, base_delay, cooldown, verbose):
 # ============================================================================
 # Endpoint handlers — each tries URL variants (v1 → plain)
 # ============================================================================
+def _is_xai_api_format(auth=None, api_format=None):
+    fmt = (api_format or (auth or {}).get("api_format") or "").lower()
+    return fmt == "xai"
+
+
+def _size_to_xai_resolution(size: str | None) -> str:
+    """Map OpenAI-style size to xAI/Sub2API resolution 1k|2k."""
+    if not size or size == "auto":
+        return "1k"
+    m = re.match(r"(\d+)x(\d+)", str(size))
+    if not m:
+        s = str(size).lower()
+        if s in ("1k", "2k"):
+            return s
+        return "1k"
+    pixels = int(m.group(1)) * int(m.group(2))
+    return "2k" if pixels > 1_200_000 else "1k"
+
+
+def _size_to_aspect_ratio(size: str | None) -> str | None:
+    if not size or size == "auto":
+        return None
+    m = re.match(r"(\d+)x(\d+)", str(size))
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    if w <= 0 or h <= 0:
+        return None
+    # Reduce to small integer ratio when obvious
+    from math import gcd
+    g = gcd(w, h)
+    a, b = w // g, h // g
+    # Prefer common Grok ratios
+    ratio = f"{a}:{b}"
+    common = {
+        "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+        "2:1", "1:2", "21:9", "4:5", "5:4",
+    }
+    if ratio in common:
+        return ratio
+    # Approximate
+    target = w / h
+    best, best_d = "1:1", 1e9
+    for r in common:
+        aa, bb = r.split(":")
+        d = abs(float(aa) / float(bb) - target)
+        if d < best_d:
+            best, best_d = r, d
+    return best
+
+
 def _request_via_images(base_url, api_key, model, prompt, size, quality, fmt,
                         timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                        seed=None, thinking=None, auth=None):
-    """POST /v1/images/generations — full → minimal payload fallback."""
+                        seed=None, thinking=None, auth=None, api_format=None):
+    """POST /v1/images/generations — xAI/Sub2API or OpenAI-style payloads."""
     headers = _request_headers(api_key, auth=auth)
     urls = _build_endpoint_urls(base_url, "images", auth=auth)
     last_exc = None
+    xai_mode = _is_xai_api_format(auth=auth, api_format=api_format) or (
+        "x.ai" in (base_url or "").lower()
+    )
 
     for style, url in urls:
         def _try(payload):
@@ -783,9 +917,36 @@ def _request_via_images(base_url, api_key, model, prompt, size, quality, fmt,
             src = _extract_image_source(result)
             if not src:
                 raise RequestFailure("images API returned no image payload", attempts=attempts)
-            return _decode_image_bytes(src, timeout), attempts
+            return _decode_image_bytes(src, timeout, api_key=api_key, base_url=base_url), attempts
 
-        # Full payload
+        # --- xAI / Sub2API: aspect_ratio + resolution (happy-loki/grok-media-skill) ---
+        if xai_mode:
+            xai_payload = {
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "resolution": _size_to_xai_resolution(size),
+            }
+            ar = _size_to_aspect_ratio(size)
+            if ar:
+                xai_payload["aspect_ratio"] = ar
+            try:
+                image_bytes, attempts = _try(xai_payload)
+                trace.append({
+                    "endpoint": "images", "variant": "xai-aspect", "route": style,
+                    "attempts": attempts, "status": "success",
+                })
+                return image_bytes, attempts, False
+            except RequestFailure as exc:
+                trace.append({
+                    "endpoint": "images", "variant": "xai-aspect", "route": style,
+                    "attempts": exc.attempts, "status": "failed", "error": str(exc),
+                })
+                last_exc = exc
+                # Fall through to OpenAI-style / minimal for hybrid relays
+                _progress("xAI-style images payload failed, trying OpenAI-style", verbose=verbose)
+
+        # Full OpenAI-compatible payload
         try:
             image_bytes, attempts = _try({
                 "model": model, "prompt": prompt, "n": 1,
@@ -799,8 +960,11 @@ def _request_via_images(base_url, api_key, model, prompt, size, quality, fmt,
         except RequestFailure as exc:
             trace.append({"endpoint": "images", "variant": "full", "route": style,
                           "attempts": exc.attempts, "status": "failed", "error": str(exc)})
-            if exc.status not in {400, 404, 405, 415, 422}:
-                raise
+            if exc.status not in {400, 404, 405, 415, 422, None} and not xai_mode:
+                # Permanent client errors only skip when not xAI hybrid
+                if exc.status and exc.status < 500 and exc.status not in RETRY_STATUS_CODES:
+                    if exc.status not in {400, 404, 405, 415, 422}:
+                        raise
             last_exc = exc
             _progress("images rich payload rejected, trying minimal payload", verbose=verbose)
 
@@ -1170,7 +1334,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                    cooldown=2.5, verbose=False, image_refs=None,
                    endpoint_mode="auto", responses_mode="auto", seed=None, thinking=None,
                    sd_steps=30, sd_cfg_scale=7.5, sd_sampler="DPM++ 2M Karras",
-                   auth=None):
+                   auth=None, api_format=None):
     """
     Generate one image through the optimal endpoint path.
     Returns (image_bytes, transport, total_attempts, trace).
@@ -1178,16 +1342,22 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
     trace: list[dict[str, Any]] = []
     is_openai = _is_official_openai(base_url)
     auth = auth or {}
+    if api_format and not auth.get("api_format"):
+        auth = {**auth, "api_format": api_format}
     wire_api = (auth.get("wire_api") or "").lower()
     is_local_proxy = bool(auth.get("is_local_codex_proxy"))
     is_codex_backend = bool(auth.get("is_codex_backend"))
+    xai_like = _is_xai_api_format(auth=auth, api_format=api_format) or (
+        "x.ai" in (base_url or "").lower()
+    )
     prefer_responses = bool(
         wire_api == "responses" or is_local_proxy or is_codex_backend or is_openai
-    )
+    ) and not xai_like
     allow_chat = (
         not is_openai
         and not is_codex_backend
         and not is_local_proxy
+        and not xai_like
     )
 
     # ---- Specialized providers ----
@@ -1205,12 +1375,15 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
         return image_bytes, f"fal:{mode}", attempts, trace
 
     # ---- Build ordered endpoint list (wire_api / local proxy awareness) ----
+    # xAI / Sub2API Imagine: only /v1/images/generations (and edits), not responses/chat.
     if endpoint_mode == "images":
         order = ["images-edits" if image_refs else "images"]
     elif endpoint_mode == "responses":
         order = ["responses"]
     elif endpoint_mode == "chat":
         order = ["chat"]
+    elif xai_like:
+        order = ["images-edits" if image_refs else "images"]
     elif image_refs:
         order = ["responses", "images-edits"]
         if allow_chat:
@@ -1236,7 +1409,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                 image_bytes, attempts, _ = _request_via_images(
                     base_url, api_key, images_model, prompt,
                     size, quality, fmt, timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                    seed=seed, thinking=thinking, auth=auth)
+                    seed=seed, thinking=thinking, auth=auth, api_format=api_format)
                 total_attempts += attempts
                 return image_bytes, "images", total_attempts, trace
 
@@ -1336,6 +1509,8 @@ def resolve_channel_params(channel):
         "api_format": fmt,
         "wire_api": channel.get("wire_api"),
         "requires_openai_auth": channel.get("requires_openai_auth"),
+        # Prefer native Imagine models when channel uses xAI/Sub2API format
+        "prefer_xai_images": fmt == "xai",
     }
 
 
@@ -1348,6 +1523,9 @@ def resolve_endpoint_mode(args_mode: str, api_format: str) -> str:
         return "sd-webui"
     if fmt == "fal":
         return "fal"
+    # xAI / Sub2API: force images generations path (not responses/chat cascade)
+    if fmt == "xai":
+        return "images"
     return "auto"
 
 
@@ -1363,6 +1541,11 @@ def _read_prompt(args):
 # Main
 # ============================================================================
 def main():
+    try:
+        from _common import configure_proxy_opener as _cpo
+        _cpo()
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="HelloMedia Image Generation")
     parser.add_argument("--prompt", default=None, help="Generation prompt. Use '-' for stdin.")
     parser.add_argument("--prompt-file", default=None, help="Read prompt from UTF-8 file")
@@ -1394,7 +1577,12 @@ def main():
     parser.add_argument("--thinking", choices=("off", "low", "medium", "high"), default=None,
                         help="gpt-image-2 reasoning budget for complex compositing (off/low/medium/high)")
     parser.add_argument("--seed", type=int, default=None, help="Generation seed for semi-deterministic output")
-    parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="Number of images to generate")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=DEFAULT_COUNT,
+        help="Number of images to generate (1-10)",
+    )
     parser.add_argument("--image", action="append", default=None, help="Reference image path (repeatable)")
     parser.add_argument("--endpoint-mode", choices=("auto", "images", "responses", "chat", "sd-webui", "fal"), default="auto",
                         help="Endpoint protocol (auto maps api_format sd-webui/fal; else OpenAI-compatible cascade)")
@@ -1412,6 +1600,21 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print config preview without generating")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+
+    try:
+        from media_caps import IMAGE_OUTPUT_COUNT_MAX, IMAGE_OUTPUT_COUNT_MIN
+    except Exception:
+        try:
+            from scripts.media_caps import IMAGE_OUTPUT_COUNT_MAX, IMAGE_OUTPUT_COUNT_MIN
+        except Exception:
+            IMAGE_OUTPUT_COUNT_MIN, IMAGE_OUTPUT_COUNT_MAX = 1, 10
+    if args.count < IMAGE_OUTPUT_COUNT_MIN or args.count > IMAGE_OUTPUT_COUNT_MAX:
+        print(json.dumps({
+            "ok": False,
+            "error": f"count must be {IMAGE_OUTPUT_COUNT_MIN}-{IMAGE_OUTPUT_COUNT_MAX}, got {args.count}",
+            "code": "invalid_count",
+        }, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
 
     # Resolve prompt
     args.prompt = _read_prompt(args)
@@ -1748,6 +1951,7 @@ def main():
                         sd_cfg_scale=args.sd_cfg_scale,
                         sd_sampler=args.sd_sampler,
                         auth=auth_ctx,
+                        api_format=params.get("api_format") or (auth_ctx or {}).get("api_format"),
                     )
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(image_bytes)

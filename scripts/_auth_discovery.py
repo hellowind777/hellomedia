@@ -18,6 +18,53 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+
+class RequestFailure(RuntimeError):
+    """Raised when an auth-related HTTP call permanently fails."""
+
+    def __init__(self, message: str, *, status: int | None = None, attempts: int = 0):
+        super().__init__(message)
+        self.status = status
+        self.attempts = attempts
+
+
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: float = 60,
+) -> Any:
+    """POST JSON and return parsed body. Raises RequestFailure on HTTP/network errors."""
+    body = json.dumps(payload).encode("utf-8")
+    hdrs = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        **(headers or {}),
+    }
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            if not raw:
+                return {}
+            text = raw.decode("utf-8", errors="replace")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise RequestFailure(
+                    f"Non-JSON response from {url}: {text[:200]}",
+                    attempts=1,
+                ) from exc
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")[:500]
+        raise RequestFailure(
+            f"HTTP {e.code} from {url}: {err_body}",
+            status=e.code,
+            attempts=1,
+        ) from e
+    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as e:
+        raise RequestFailure(f"Network error calling {url}: {e}", attempts=1) from e
+
 BASE_URL_ENV = ("OPENAI_BASE_URL", "GPT_BASE_URL", "BASE_URL")
 API_KEY_ENV = ("OPENAI_API_KEY", "GPT_API_KEY", "API_KEY")
 MODEL_ENV = ("OPENAI_IMAGE_MODEL", "OPENAI_MODEL", "GPT_MODEL")

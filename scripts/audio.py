@@ -28,7 +28,9 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import (  # noqa: E402
+    configure_proxy_opener,
     USER_AGENT,
+    resolve_media_user_agent,
     channel_creds,
     emit_json,
     eprint,
@@ -88,7 +90,7 @@ def tts_xai(creds: dict, args) -> dict:
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
         "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": resolve_media_user_agent(),
         "Accept": "*/*",
     }
     data = json.dumps(payload).encode("utf-8")
@@ -151,7 +153,7 @@ def tts_openai_compat(creds: dict, args) -> dict:
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
         "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": resolve_media_user_agent(),
     }
     data = json.dumps(payload).encode("utf-8")
     ok, body, resp_headers = http_bytes(
@@ -195,7 +197,7 @@ def stt_xai(creds: dict, args) -> dict:
 
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
-        "User-Agent": USER_AGENT,
+        "User-Agent": resolve_media_user_agent(),
     }
 
     if args.audio_url:
@@ -260,7 +262,7 @@ def stt_openai_compat(creds: dict, args) -> dict:
     body, boundary = _multipart(fields, [("file", Path(path))])
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
-        "User-Agent": USER_AGENT,
+        "User-Agent": resolve_media_user_agent(),
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     }
     ok, raw, _ = http_bytes(
@@ -304,6 +306,11 @@ def pick_tts_backend(creds: dict) -> str:
 
 
 def main():
+    try:
+        from _common import configure_proxy_opener as _cpo
+        _cpo()
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="HelloMedia Audio (TTS/STT)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -319,8 +326,8 @@ def main():
     p_tts.add_argument("--model", default=None)
     p_tts.add_argument("--output", default="./output/speech.mp3")
     p_tts.add_argument("--channel", type=int, default=None)
-    p_tts.add_argument("--timeout", type=float, default=120)
-    p_tts.add_argument("--retry-count", type=int, default=2)
+    p_tts.add_argument("--timeout", type=float, default=None)
+    p_tts.add_argument("--retry-count", type=int, default=None)
     p_tts.add_argument("--dry-run", action="store_true")
     p_tts.add_argument("--backend", choices=("auto", "xai", "openai"), default="auto")
 
@@ -334,14 +341,14 @@ def main():
     p_stt.add_argument("--model", default=None)
     p_stt.add_argument("--output", default="-", help="JSON output path")
     p_stt.add_argument("--channel", type=int, default=None)
-    p_stt.add_argument("--timeout", type=float, default=180)
-    p_stt.add_argument("--retry-count", type=int, default=2)
+    p_stt.add_argument("--timeout", type=float, default=None)
+    p_stt.add_argument("--retry-count", type=int, default=None)
     p_stt.add_argument("--dry-run", action="store_true")
     p_stt.add_argument("--backend", choices=("auto", "xai", "openai"), default="auto")
 
     p_voices = sub.add_parser("voices", help="List TTS voices (xAI)")
     p_voices.add_argument("--channel", type=int, default=None)
-    p_voices.add_argument("--timeout", type=float, default=30)
+    p_voices.add_argument("--timeout", type=float, default=None)
 
     args = parser.parse_args()
 
@@ -349,6 +356,19 @@ def main():
         channels, defaults = load_channels("audio")
     except FileNotFoundError as e:
         fail({"error": str(e)})
+
+    # Align with config defaults (CLI None → defaults)
+    default_timeout = float(defaults.get("timeout_seconds", 120))
+    default_retries = int(defaults.get("retry_count", 2))
+    if getattr(args, "timeout", None) is None:
+        if args.cmd == "stt":
+            args.timeout = max(default_timeout, 180.0)
+        elif args.cmd == "voices":
+            args.timeout = min(default_timeout, 30.0)
+        else:
+            args.timeout = default_timeout
+    if getattr(args, "retry_count", None) is None and args.cmd in ("tts", "stt"):
+        args.retry_count = default_retries
 
     targets = [c for c in channels if args.channel is None or c.get("priority") == args.channel]
     if not targets:

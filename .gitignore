@@ -1,5 +1,16 @@
-# User config with real API keys
+# User config with real API keys / secrets
 config.json
+.env
+.env.*
+*.pem
+*.key
+secrets/
+.secret/
+
+# Local auth / agent state (never commit)
+.runtime/
+**/auth.json
+**/credentials.json
 
 # Python
 __pycache__/
@@ -9,22 +20,41 @@ __pycache__/
 *.py[cod]
 *$py.class
 .Python
+.venv/
+venv/
 
 # OS
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Output / runtime
+# Generated media / local jobs
 output/
+outputs/
 *.png
 *.jpg
 *.jpeg
 *.webp
+*.gif
 *.mp4
+*.webm
+*.mov
 *.mp3
 *.wav
-.runtime/
+*.m4a
+
+# Tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Optional local notes (do not ship secrets)
+COMMIT_MESSAGE.md

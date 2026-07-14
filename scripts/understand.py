@@ -24,6 +24,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import (  # noqa: E402
+    configure_proxy_opener,
     USER_AGENT,
     channel_creds,
     emit_json,
@@ -240,6 +241,11 @@ def understand_audio(audio_channels, vision_channels, prompt, audio, max_tokens,
 
 
 def main():
+    try:
+        from _common import configure_proxy_opener as _cpo
+        _cpo()
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="HelloMedia media understanding")
     parser.add_argument("--image", default=None)
     parser.add_argument("--video", default=None)
@@ -248,6 +254,13 @@ def main():
     parser.add_argument("--output", default="-")
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--channel", type=int, default=None)
+    parser.add_argument("--timeout", type=float, default=None, help="Request timeout (default: config)")
+    parser.add_argument("--retry-count", type=int, default=None, help="Retries (default: config)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print channel plan without calling the API",
+    )
     args = parser.parse_args()
 
     modalities = [m for m in (args.image, args.video, args.audio) if m]
@@ -266,12 +279,37 @@ def main():
         audio_chs = []
 
     max_tokens = args.max_tokens or defaults.get("max_tokens", 4096)
-    timeout = float(defaults.get("timeout_seconds", 300))
-    retries = int(defaults.get("retry_count", 2))
+    timeout = float(args.timeout if args.timeout is not None else defaults.get("timeout_seconds", 300))
+    retries = int(args.retry_count if args.retry_count is not None else defaults.get("retry_count", 2))
 
     if args.channel is not None:
         vision_chs = [c for c in vision_chs if c.get("priority") == args.channel]
         audio_chs = [c for c in audio_chs if c.get("priority") == args.channel]
+
+    if args.dry_run:
+        modality = "image" if args.image else ("video" if args.video else "audio")
+        chs = audio_chs if modality == "audio" else vision_chs
+        emit_json({
+            "ok": True,
+            "dry_run": True,
+            "modality": modality,
+            "prompt_preview": (args.prompt or "")[:120],
+            "max_tokens": max_tokens,
+            "timeout_seconds": timeout,
+            "retry_count": retries,
+            "channel_count": len(chs),
+            "channels": [
+                {
+                    "name": c.get("name"),
+                    "priority": c.get("priority"),
+                    "model": c.get("model") or c.get("audio_model") or "",
+                    "api_format": c.get("api_format"),
+                    "has_api_key": bool(c.get("api_key") or c.get("audio_api_key")),
+                }
+                for c in chs
+            ],
+        }, args.output)
+        return
 
     try:
         if args.image:

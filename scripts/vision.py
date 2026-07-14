@@ -25,6 +25,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import (  # noqa: E402
+    configure_proxy_opener,
     PERMANENT_4XX,
     RETRY_STATUS_CODES,
     SKILL_DIR,
@@ -34,6 +35,7 @@ from _common import (  # noqa: E402
     load_channels,
     normalize_base_url,
     normalize_path,
+    resolve_media_user_agent,
     safe_output_path,
 )
 
@@ -84,12 +86,6 @@ def load_image_payload(path: str, *, compress: bool = True) -> tuple[str, str]:
     except Exception as exc:
         print(f"[vision] compress skipped for {path}: {exc}", file=sys.stderr)
     return base64.b64encode(raw).decode(), mime
-
-
-def encode_image(path: str) -> str:
-    """Encode image without compression."""
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
 
 
 def _request_with_retries(url, body, headers, timeout, retries, label):
@@ -152,10 +148,13 @@ def _try_openai(channel, images, prompt, max_tokens, timeout, *, compress=True, 
     headers = {
         "Authorization": f"Bearer {channel['api_key']}",
         "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "User-Agent": resolve_media_user_agent(),
     }
     base = normalize_base_url(channel["base_url"])
     label = channel.get("name", "openai")
+    # Prefer max_completion_tokens for newer models; keep max_tokens fallback
+    # already in payload — some relays only accept one form.
     return _request_with_retries(
         f"{base}/v1/chat/completions", body, headers, timeout, retries, label
     )
@@ -209,6 +208,11 @@ def try_channel(channel, images, prompt, max_tokens, timeout, *, compress=True, 
 
 
 def main():
+    try:
+        from _common import configure_proxy_opener as _cpo
+        _cpo()
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="HelloMedia Vision Analysis")
     parser.add_argument("--image", help="Single image path")
     parser.add_argument("--image-dir", help="Directory of images")

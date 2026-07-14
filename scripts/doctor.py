@@ -18,9 +18,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _common import (  # noqa: E402
     SKILL_DIR,
     USER_AGENT,
+    check_xai_network,
+    configure_proxy_opener,
+    eprint,
     load_config,
     normalize_base_url,
+    proxy_summary,
+    skill_version,
 )
+from media_caps import capabilities_dict  # noqa: E402
 
 
 def _pillow_installed() -> bool:
@@ -230,6 +236,7 @@ def diagnose_channel(ch: dict, timeout: float, *, probe_live: bool) -> dict:
 
 
 def main():
+    configure_proxy_opener()
     parser = argparse.ArgumentParser(description="HelloMedia connectivity doctor")
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument(
@@ -252,7 +259,28 @@ def main():
         action="store_true",
         help="Only diagnose channels with audio:true",
     )
+    parser.add_argument(
+        "--capabilities",
+        action="store_true",
+        help="Print machine-readable media parameter capabilities (no network, no keys)",
+    )
+    parser.add_argument(
+        "--xai-network",
+        action="store_true",
+        help="Probe xAI api/imgen/vidgen connectivity (uses proxy if configured)",
+    )
     args = parser.parse_args()
+
+    if args.capabilities:
+        print(json.dumps(capabilities_dict(), ensure_ascii=False, indent=2))
+        return
+
+    if args.xai_network:
+        report = check_xai_network(timeout=min(args.timeout, 10.0), use_cache=False)
+        print(json.dumps({"ok": bool(report.get("ok")), "xai_network": report}, ensure_ascii=False, indent=2))
+        if not report.get("ok"):
+            sys.exit(2)
+        return
 
     try:
         cfg, _ = load_config()
@@ -270,27 +298,50 @@ def main():
             continue
         if args.audio_only and not ch.get("audio"):
             continue
-        results.append(diagnose_channel(ch, args.timeout, probe_live=not args.dry_run))
+        name = ch.get("name", "?")
+        mode = "dry-run" if args.dry_run else "live"
+        eprint(f"[doctor] probing {name} ({mode})...")
+        report = diagnose_channel(ch, args.timeout, probe_live=not args.dry_run)
+        eprint(f"[doctor] {name}: status={report.get('status')}")
+        results.append(report)
+
+    fail_count = sum(1 for c in results if c.get("status") == "fail")
+    warn_count = sum(1 for c in results if c.get("status") in ("warn", "degraded"))
+    # ok=True means the doctor ran; overall_status reflects channel health
+    if fail_count and not args.dry_run:
+        overall = "fail"
+    elif warn_count and not args.dry_run:
+        overall = "degraded"
+    elif args.dry_run:
+        overall = "dry"
+    else:
+        overall = "ok"
 
     out = {
-        "ok": True,
+        "ok": overall != "fail",
+        "overall_status": overall,
+        "version": skill_version(),
         "skill_dir": str(SKILL_DIR),
         "defaults": defaults,
         "channel_count": len(results),
         "channels": results,
         "pillow_installed": _pillow_installed(),
+        "proxy": proxy_summary(),
         "capabilities": {
             "vision": any(c.get("vision") for c in channels),
             "generate": any(c.get("generate") for c in channels),
             "video": any(c.get("video") for c in channels),
             "audio": any(c.get("audio") for c in channels),
         },
+        "media_capabilities": capabilities_dict(),
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
     if not args.dry_run:
         vision_channels = [c for c in results if c.get("vision_enabled")]
         if vision_channels and all(c.get("status") == "fail" for c in vision_channels):
+            sys.exit(2)
+        if overall == "fail":
             sys.exit(2)
 
 
