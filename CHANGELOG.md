@@ -5,6 +5,33 @@ All notable changes to **HelloMedia** (`hellomedia`) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-07-14
+
+### Added
+
+- `scripts/_clipboard.py` — OS clipboard image capture (Pillow / PowerShell / pngpaste / osascript / wl-paste / xclip).
+- `vision.py --from-clipboard`, multi `--image`; `understand.py --from-clipboard`.
+- `doctor.py --clipboard` / `--clipboard-capture` backend probe.
+- Offline tests: `tests/test_clipboard.py`, `tests/test_vision_compress.py`.
+- Env `HELLOMEDIA_CLIPBOARD_MAX_BYTES` (default 40MB).
+- Env `HELLOMEDIA_COMPRESS_REENCODE_MIN_BYTES` (default 2MB) for re-encode-without-resize.
+
+### Changed
+
+- **Skill-first multimodal routing**: assume host main model has **no vision**. Understand + generate (image/video/audio) go through HelloMedia by default; do not try the host model for vision first.
+- **Paste-image path**: scripts cannot read host `[Image #N]` tokens. Agents use `--image <path>` or re-copy to OS clipboard then `--from-clipboard`. Captures land under skill `.runtime/clipboard/` (gitignored).
+- **Clarity-first vision compress** (shared `load_image_payload` in `_common.py`): skip ≤256KB; resize only if long edge > **2048**; JPEG quality **90**; re-encode without resize only if file ≥ **2MB**. Used by `vision.py` and `understand.py --image`.
+- RGBA/LA/P+transparency flattened onto **white** before JPEG (avoids black fringes).
+- `understand.py` local paths normalized; missing files return a clear error.
+- Anthropic vision requests use the same browser-like `User-Agent` as the OpenAI path.
+- Clipboard busy/open failures fall through backends and surface as recoverable `clipboard_empty` (not opaque hard errors).
+
+### Fixed
+
+- Leftover “host model first” docstring in `understand.py` (aligned with skill-first routing).
+
+---
+
 ## [0.5.1] — 2026-07-14
 
 ### Added
@@ -51,30 +78,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Skill identity **hellomedia** (HelloMedia): full multimodal understand + generate surface.
-- Self-contained image generation: skill `config.json` channels **plus** Codex / Hermes / OpenClaw runtime credentials.
-- Video generate/edit/extend CLI and audio TTS/STT scripts (provider-dependent).
-- Multi-channel doctor probes; local OpenAI-auth proxy awareness; Codex attribution headers.
+- Self-contained image generation with multi-channel config and runtime auth discovery
+  (Codex / Hermes / OpenClaw / env / CLI).
+- Video generate/edit/extend, audio TTS/STT, media understand expansion.
+- Multi-capability doctor and path-safe outputs.
 
 ### Changed
 
-- Consolidated multimodal skill packaging for Claude Code / Grok / Codex hosts.
-
----
-
-## [0.4.0] — prior
-
-- Video generate/edit/extend, audio TTS/STT, media understand expansion.
-- Multi-capability `doctor.py` checks.
-
----
-
-## [0.3.x] — prior
-
-- Agent Skills compliance, encoding/path fixes, safe output enforcement.
 - Multi-provider vision & generation, stdlib-only baseline.
-
----
-
-## [0.2.x] – [0.1.0] — prior
-
-- Early generate timeout/retry calibration, img2img flows, initial skill packaging.

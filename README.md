@@ -5,7 +5,7 @@
 [English](./README.md) · [简体中文](./README_CN.md)
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.1-green.svg)](./VERSION)
+[![Version](https://img.shields.io/badge/version-0.5.2-green.svg)](./VERSION)
 [![Python](https://img.shields.io/badge/python-3.10%2B%20stdlib-blue.svg)](./scripts)
 
 > Linked & recognized by the [LINUX DO](https://linux.do) community.
@@ -14,28 +14,32 @@
 
 ## Overview
 
-HelloMedia is a self-contained **Agent Skill** package: routing rules live in `SKILL.md`; work is done by **stdlib-only** CLI scripts under `scripts/`. Optional [Pillow](https://pypi.org/project/Pillow/) compresses large images for vision.
+HelloMedia is a self-contained **Agent Skill** package: routing rules live in `SKILL.md`; work is done by **stdlib-only** CLI scripts under `scripts/`. Optional [Pillow](https://pypi.org/project/Pillow/) enables clarity-preserving vision compression and stronger clipboard capture.
 
 | Modality | Understand | Generate / edit |
 |----------|:----------:|:----------------|
-| **Image** | `vision.py` / `understand.py` | `generate.py` (text-to-image, image edit) |
+| **Image** | `vision.py` / `understand.py` (+ `--from-clipboard`) | `generate.py` (text-to-image, image edit) |
 | **Video** | `understand.py --video` | `video.py` (text / image / reference / edit / extend) |
 | **Audio** | STT (+ optional LLM summary) | TTS |
 
-**Best for:** agents that need a reliable API path when the host cannot read media, or when you must generate media to disk with multi-provider config.
+**Best for:** hosts whose main model has **no reliable vision**, multi-provider API pipelines, and fixed on-disk media outputs.
 
-**Not for:** replacing host-native tools when they already work (prefer host first for understand); general web search (use a search skill).
+**Not for:** general web search (use a search skill). Default assumption: **the host model cannot see images** — route multimodal work through this skill.
 
 ### Design rules
 
-1. **Host first for understand** — if the message already includes image/video/audio, let the host model try; call this skill on failure.
-2. **Generation always via skill** — image / video / TTS go through `generate.py` / `video.py` / `audio.py`.
-3. **Bring your own keys** — multi-channel `config.json` with per-capability flags; no hard dependency on a single vendor for vision or image gen.
+1. **Skill-first for multimodal** — image/video/audio understand and all generation go through HelloMedia by default (do not try the host model for vision first).
+2. **Paste needs a path or OS clipboard** — host `[Image #N]` chips are not readable by scripts; use `--image <path>` or re-copy the image and run `--from-clipboard`.
+3. **Generation always via skill** — image / video / TTS go through `generate.py` / `video.py` / `audio.py`.
+4. **Bring your own keys** — multi-channel `config.json` with per-capability flags; no hard dependency on a single vendor for vision or image gen.
+5. **Clarity-preserving vision compress** — optional Pillow: default max side 2048, JPEG q=90, skip under 256KB.
 
 ---
 
 ## Features
 
+- **Skill-first routing** — assume no host vision; agents call HelloMedia for understand + generate
+- **Clipboard capture** — `--from-clipboard` via Pillow / PowerShell / pngpaste / osascript / wl-paste / xclip; doctor probe included
 - **Multi-channel config** — `vision` / `generate` / `video` / `audio` flags, `priority` cascade, optional per-capability keys (`image_*` / `video_*` / `audio_*`)
 - **Image generation** — OpenAI-compatible images & responses, xAI/Sub2API Imagine (`aspect_ratio` + `resolution`), SD WebUI (`api_format: sd-webui`), fal (`api_format: fal`), CLI/env + Codex/Hermes/OpenClaw runtime auth
 - **Video generation** — xAI Grok Imagine REST (and Sub2API relays): text-to-video, image-to-video (`image_url` on non-official hosts), reference-to-video, edit, extend; async poll + `--recover-url` download-only recovery
@@ -44,7 +48,7 @@ HelloMedia is a self-contained **Agent Skill** package: routing rules live in `S
 - **Vision** — OpenAI / Anthropic / xAI and OpenAI-compatible relays (Kimi, MiniMax, Gemini proxy, Ollama, vLLM, …)
 - **Safety & ops** — path-safe outputs (cwd / skill tree / `.runtime`); proxy via `HELLOMEDIA_PROXY` or `HTTP(S)_PROXY` (**loopback allowed**); browser-like `User-Agent` for CDN downloads; `doctor.py` probes
 - **Windows-friendly** — UTF-8 stdout/stderr, path normalization
-- **Tests** — offline `pytest` for caps, download, proxy, CLI dry-run, path safety, Sub2API contracts
+- **Tests** — offline `pytest` for caps, clipboard resolve, compress, download, proxy, CLI dry-run, path safety, Sub2API contracts
 
 ### Provider matrix
 
@@ -70,7 +74,8 @@ xAI/Grok is a full-stack example, not the only backend for vision/image/audio. *
 - **Python 3.10+** (stdlib only; tested on 3.13)
 - Network access to your chosen API endpoints (or local Ollama / SD WebUI)
 - API keys for the capabilities you enable
-- Optional: Pillow for large-image compression in vision
+- Optional: Pillow (vision compress + stronger clipboard on Windows/macOS)
+- Optional platform tools for clipboard: PowerShell (Windows), `pngpaste` (macOS), `wl-paste` / `xclip` (Linux)
 
 ---
 
@@ -117,6 +122,7 @@ Optional: `image_base_url` / `image_api_key` when image traffic should not reuse
 ```bash
 python scripts/doctor.py --dry-run
 python scripts/doctor.py --capabilities
+python scripts/doctor.py --clipboard
 python scripts/generate.py --prompt "test" --dry-run
 python scripts/video.py --prompt "test" --dry-run
 python scripts/audio.py tts --text "test" --dry-run
@@ -143,13 +149,19 @@ Successful generate results include absolute paths and markdown image tags for t
 
 ```bash
 python scripts/vision.py --image ./screenshot.png --prompt "Describe the UI"
+python scripts/vision.py --image ./a.png --image ./b.png --prompt "Compare both"
 python scripts/vision.py --image-dir ./pages/ --prompt "Batch analyze"
+python scripts/vision.py --from-clipboard --prompt "Describe the pasted screenshot"
+python scripts/vision.py --image ./big.png --prompt "..." --no-compress
 python scripts/understand.py --image ./shot.png --prompt "Extract visible text"
+python scripts/understand.py --from-clipboard --prompt "Extract UI copy"
 python scripts/understand.py --video ./clip.mp4 --prompt "Summarize scenes and speech"
 python scripts/understand.py --audio ./meeting.mp3 --prompt "List action items"
 python scripts/understand.py --image ./shot.png --prompt "x" --dry-run
 python scripts/audio.py stt --audio ./meeting.mp3 --format-text
 ```
+
+**Paste note:** host `[Image #N]` chips are not readable by skill scripts. Use a file path, or re-copy the image to the **OS clipboard** and run `--from-clipboard`. On Windows, pasting into Claude/Grok CLI often needs **`Alt+V`**. If the host already consumed the clipboard, copy the image again before `--from-clipboard`.
 
 ### Generate / edit images
 
@@ -191,7 +203,7 @@ python scripts/video.py --prompt "test" --dry-run
 If generation succeeds but local download fails, the result keeps `video_url` / `download_error`. Recover without re-POST:
 
 ```bash
-python scripts/video.py --recover-url "https://.../video.mp4" --output ./output/recovered.mp4
+python scripts/video.py --recover-url "https://cdn.example.com/video.mp4" --output ./output/recovered.mp4
 ```
 
 ### Audio (TTS / STT)
@@ -208,6 +220,8 @@ python scripts/audio.py tts --text "test" --dry-run
 ```bash
 python scripts/doctor.py --dry-run
 python scripts/doctor.py --capabilities
+python scripts/doctor.py --clipboard
+python scripts/doctor.py --clipboard --clipboard-capture
 python scripts/doctor.py --xai-network
 python scripts/doctor.py --vision-only
 python scripts/doctor.py --video-only
@@ -253,9 +267,11 @@ Template: [`config.example.json`](./config.example.json). Local secrets: `config
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `HELLOMEDIA_COMPRESS_MIN_BYTES` | 51200 | Compress vision inputs above this size |
-| `HELLOMEDIA_COMPRESS_MAX_SIDE` | 1536 | Max long edge after compress |
-| `HELLOMEDIA_COMPRESS_JPEG_QUALITY` | 75 | JPEG quality |
+| `HELLOMEDIA_COMPRESS_MIN_BYTES` | 262144 | Skip compress at or under this size (256KB) |
+| `HELLOMEDIA_COMPRESS_MAX_SIDE` | 2048 | Resize only if long edge exceeds this |
+| `HELLOMEDIA_COMPRESS_JPEG_QUALITY` | 90 | JPEG quality when re-encoding (clarity-first) |
+| `HELLOMEDIA_COMPRESS_REENCODE_MIN_BYTES` | 2097152 | Re-encode without resize only if file ≥ 2MB |
+| `HELLOMEDIA_CLIPBOARD_MAX_BYTES` | 41943040 | Max clipboard capture size |
 | `HELLOMEDIA_PROXY` | — | HTTP(S) proxy for both schemes |
 | `HELLOMEDIA_USER_AGENT` | browser-like | Override UA for API + imgen/vidgen CDN |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | — | Standard proxy env |
@@ -276,20 +292,21 @@ hellomedia/
 ├── RELEASE_NOTES.md         # Bilingual release highlights
 ├── CHANGELOG.md             # Version history
 ├── LICENSE                  # Apache-2.0
-├── VERSION                  # 0.5.1
+├── VERSION                  # 0.5.2
 ├── agents/openai.yaml       # Codex/OpenAI skill metadata
 ├── config.example.json      # Multi-provider template
 ├── config.json              # Local secrets (gitignored)
 ├── scripts/
-│   ├── _common.py           # Shared HTTP, proxy, paths, download
+│   ├── _common.py           # Shared HTTP, proxy, paths, download, vision compress
+│   ├── _clipboard.py        # OS clipboard image capture
 │   ├── _auth_discovery.py   # Codex / Hermes / OpenClaw auth
 │   ├── media_caps.py        # Parameter caps & video preflight
-│   ├── vision.py            # Image understand
+│   ├── vision.py            # Image understand (+ clipboard)
 │   ├── understand.py        # Image / video / audio understand
 │   ├── generate.py          # Image generate & edit
 │   ├── video.py             # Video generate / edit / extend / recover
 │   ├── audio.py             # TTS / STT / voices
-│   └── doctor.py            # Connectivity & capabilities
+│   └── doctor.py            # Connectivity, capabilities, clipboard probe
 ├── tests/                   # pytest (offline-friendly)
 └── output/                  # Generated media (gitignored)
 ```
@@ -307,6 +324,9 @@ python -m pytest tests/ -v
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
 | `config.json not found` | Not copied from example | `cp config.example.json config.json` |
+| Host pasted image but skill “sees nothing” | Scripts cannot read `[Image #N]` | Save path → `--image`, or re-copy image → `--from-clipboard` |
+| `clipboard_empty` / busy | Clipboard empty, consumed, or locked | Re-copy image; close lockers; or pass a file path |
+| Clipboard fails in WSL/SSH | Wrong clipboard namespace | Save under a mounted path and use `--image` |
 | Vision/gen fails with 401/403 | Bad key or provider group | Fix key; for Imagine “not enabled for this group”, enable product on the account (not a CLI bug) |
 | Video dry-run OK, live 403 | Relay/account without Imagine | Use a channel with Imagine entitlement |
 | Sub2API video blocked on network preflight | Old behavior / mis-set host | Official CDN preflight is only for `api.x.ai`; use relay `base_url` or `--skip-network-check` |
@@ -322,6 +342,13 @@ More routing detail: [`SKILL.md`](./SKILL.md). Release detail: [`RELEASE_NOTES.m
 ## Changelog
 
 See **[CHANGELOG.md](./CHANGELOG.md)** for the full history. Highlights:
+
+### v0.5.2
+
+- Skill-first multimodal routing (assume host model has no vision)
+- OS clipboard capture: `--from-clipboard`, doctor `--clipboard`
+- Clarity-first vision compress: max side 2048, JPEG q=90, skip under 256KB
+- RGBA flatten on white; clipboard busy → recoverable empty
 
 ### v0.5.1
 

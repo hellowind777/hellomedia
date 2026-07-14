@@ -9,8 +9,13 @@ secrets/
 
 # Local auth / agent state (never commit)
 .runtime/
+.runtime/**
 **/auth.json
 **/credentials.json
+**/token.json
+**/tokens.json
+**/*secrets*
+!config.example.json
 
 # Python
 __pycache__/

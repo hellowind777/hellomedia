@@ -1,4 +1,4 @@
 interface:
   display_name: "HelloMedia"
-  short_description: "Full multimodal skill: understand and generate image, video, and audio. Self-contained image generation with skill channels and Codex/Hermes/OpenClaw auth."
-  default_prompt: "Use the hellomedia skill for image/video/audio understanding or generation. For images, run scripts/generate.py (config.json channels and/or Codex/Hermes/OpenClaw/env/CLI credentials)."
+  short_description: "Skill-first multimodal: vision, image/video gen, audio. Clipboard capture when paste has no path."
+  default_prompt: "Assume the host model cannot see images. Use hellomedia for vision, image/video gen, and audio. Path: scripts/vision.py --image <path>. Pasted without path: ask user to re-copy the image, then scripts/vision.py --from-clipboard --prompt '...'. Generation: generate.py / video.py / audio.py with config.json and/or runtime credentials."

@@ -8,9 +8,7 @@ Zero hard dependencies — stdlib only (Pillow optional).
 from __future__ import annotations
 
 import argparse
-import base64
 import json
-import os
 import socket
 import sys
 import time
@@ -28,64 +26,15 @@ from _common import (  # noqa: E402
     configure_proxy_opener,
     PERMANENT_4XX,
     RETRY_STATUS_CODES,
-    SKILL_DIR,
-    USER_AGENT,
     emit_json,
     fail,
     load_channels,
+    load_image_payload,
     normalize_base_url,
     normalize_path,
     resolve_media_user_agent,
     safe_output_path,
 )
-
-_COMPRESS_MIN_BYTES = int(os.environ.get("HELLOMEDIA_COMPRESS_MIN_BYTES", str(50 * 1024)))
-_COMPRESS_MAX_SIDE = int(os.environ.get("HELLOMEDIA_COMPRESS_MAX_SIDE", "1536"))
-_COMPRESS_JPEG_QUALITY = int(os.environ.get("HELLOMEDIA_COMPRESS_JPEG_QUALITY", "75"))
-
-
-def _mime_for_ext(path: str) -> str:
-    ext = os.path.splitext(path)[1].lower().lstrip(".")
-    return {
-        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-        "bmp": "image/bmp", "tiff": "image/tiff",
-        "webp": "image/webp", "gif": "image/gif",
-    }.get(ext, "image/png")
-
-
-def load_image_payload(path: str, *, compress: bool = True) -> tuple[str, str]:
-    """Return (base64_str, mime). Compress large images when Pillow is available."""
-    with open(path, "rb") as f:
-        raw = f.read()
-    mime = _mime_for_ext(path)
-    if not compress or len(raw) <= _COMPRESS_MIN_BYTES:
-        return base64.b64encode(raw).decode(), mime
-    try:
-        from io import BytesIO
-        from PIL import Image  # optional
-    except ImportError:
-        return base64.b64encode(raw).decode(), mime
-
-    try:
-        im = Image.open(path)
-        if getattr(im, "is_animated", False):
-            im.seek(0)
-        im = im.convert("RGB")
-        resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-        im.thumbnail((_COMPRESS_MAX_SIDE, _COMPRESS_MAX_SIDE), resample)
-        buf = BytesIO()
-        im.save(buf, format="JPEG", quality=_COMPRESS_JPEG_QUALITY, optimize=True)
-        compressed = buf.getvalue()
-        if len(compressed) < len(raw):
-            print(
-                f"[vision] compressed {os.path.basename(path)}: "
-                f"{len(raw)} -> {len(compressed)} bytes",
-                file=sys.stderr,
-            )
-            return base64.b64encode(compressed).decode(), "image/jpeg"
-    except Exception as exc:
-        print(f"[vision] compress skipped for {path}: {exc}", file=sys.stderr)
-    return base64.b64encode(raw).decode(), mime
 
 
 def _request_with_retries(url, body, headers, timeout, retries, label):
@@ -180,7 +129,7 @@ def _try_anthropic(channel, images, prompt, max_tokens, timeout, *, compress=Tru
         "x-api-key": channel["api_key"],
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": resolve_media_user_agent(),
     }
     base = normalize_base_url(channel["base_url"])
     label = channel.get("name", "anthropic")
@@ -214,8 +163,18 @@ def main():
     except Exception:
         pass
     parser = argparse.ArgumentParser(description="HelloMedia Vision Analysis")
-    parser.add_argument("--image", help="Single image path")
+    parser.add_argument(
+        "--image",
+        action="append",
+        default=None,
+        help="Image path (repeatable). Can combine with --from-clipboard",
+    )
     parser.add_argument("--image-dir", help="Directory of images")
+    parser.add_argument(
+        "--from-clipboard",
+        action="store_true",
+        help="Capture an image from the OS clipboard into skill .runtime and analyze it",
+    )
     parser.add_argument("--prompt", required=True, help="Analysis prompt")
     parser.add_argument("--output", default="-", help="Output file (default: stdout)")
     parser.add_argument("--max-tokens", type=int, default=None)
@@ -237,23 +196,16 @@ def main():
     retries = int(defaults.get("retry_count", 2))
     compress = not args.no_compress
 
-    images = []
-    missing = []
-    if args.image:
-        p = normalize_path(args.image)
-        if p and Path(p).exists():
-            images.append(p)
-        else:
-            missing.append(p or args.image)
-    if args.image_dir:
-        dir_path = Path(normalize_path(args.image_dir) or args.image_dir)
-        for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tiff", "*.webp", "*.gif"):
-            images.extend(str(p).replace("\\", "/") for p in dir_path.glob(ext))
-        images.sort()
-    if missing:
-        fail({"error": f"Image file(s) not found: {missing}"})
-    if not images:
-        fail({"error": "No images provided"})
+    from _clipboard import resolve_image_inputs  # noqa: E402
+
+    resolved = resolve_image_inputs(
+        images=args.image,
+        image_dir=args.image_dir,
+        from_clipboard=args.from_clipboard,
+    )
+    if not resolved.get("ok"):
+        fail(resolved)
+    images = resolved["paths"]
 
     targets = [c for c in channels if args.channel is None or c.get("priority") == args.channel]
     if not targets:
@@ -270,22 +222,25 @@ def main():
         if ok:
             result["_channel"] = channel.get("name")
             result["_model"] = channel.get("model")
+            result["_images"] = images
+            if resolved.get("clipboard"):
+                result["_clipboard"] = resolved["clipboard"]
             if args.output == "-":
                 emit_json(result, "-")
             else:
-                safe, resolved = safe_output_path(args.output)
-                if not safe or resolved is None:
+                safe, out_path = safe_output_path(args.output)
+                if not safe or out_path is None:
                     fail({
                         "error": (
                             f"Unsafe output path rejected: {args.output}. "
                             "Output to stdout or a path within the project directory."
                         )
                     })
-                resolved.parent.mkdir(parents=True, exist_ok=True)
-                resolved.write_text(
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                print(f"Saved to {resolved}", file=sys.stderr)
+                print(f"Saved to {out_path}", file=sys.stderr)
             return
         errors.append(f"{label}: {result.get('error', 'unknown')}")
 

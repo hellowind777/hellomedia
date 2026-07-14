@@ -153,8 +153,133 @@ def mime_for_path(path: str) -> str:
     }.get(ext, "application/octet-stream")
 
 
-def file_to_data_url(path: str, max_bytes: int | None = None) -> str:
+# Vision pre-send compression (optional Pillow). Defaults favor clarity over size:
+# only shrink when large, keep high JPEG quality, long edge up to 2048.
+_COMPRESS_MIN_BYTES = int(os.environ.get("HELLOMEDIA_COMPRESS_MIN_BYTES", str(256 * 1024)))
+_COMPRESS_MAX_SIDE = int(os.environ.get("HELLOMEDIA_COMPRESS_MAX_SIDE", "2048"))
+_COMPRESS_JPEG_QUALITY = int(os.environ.get("HELLOMEDIA_COMPRESS_JPEG_QUALITY", "90"))
+# If within max side but still huge (e.g. uncompressed PNG), re-encode only above this.
+_COMPRESS_REENCODE_MIN_BYTES = int(
+    os.environ.get("HELLOMEDIA_COMPRESS_REENCODE_MIN_BYTES", str(2 * 1024 * 1024))
+)
+
+
+def _mime_for_image_ext(path: str) -> str:
+    ext = Path(path).suffix.lower().lstrip(".")
+    return {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "bmp": "image/bmp",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.get(ext, mime_for_path(path) if Path(path).suffix else "image/png")
+
+
+def load_image_payload(path: str, *, compress: bool = True) -> tuple[str, str]:
+    """Return (base64_str, mime) for vision APIs.
+
+    When Pillow is available and compress=True:
+    - Files at or under HELLOMEDIA_COMPRESS_MIN_BYTES are sent as-is.
+    - Resize only when the longer side exceeds HELLOMEDIA_COMPRESS_MAX_SIDE (default 2048).
+    - Re-encode to high-quality JPEG only when resizing, or when the file is very large
+      (HELLOMEDIA_COMPRESS_REENCODE_MIN_BYTES, default 2MB) even if dimensions already fit.
+    - Never replace the original unless the compressed payload is strictly smaller.
+    """
+    import base64
+    from io import BytesIO
+
     p = Path(path)
+    raw = p.read_bytes()
+    mime = _mime_for_image_ext(str(p))
+    if not compress or len(raw) <= _COMPRESS_MIN_BYTES:
+        return base64.b64encode(raw).decode("ascii"), mime
+
+    try:
+        from PIL import Image  # optional
+    except ImportError:
+        return base64.b64encode(raw).decode("ascii"), mime
+
+    try:
+        im = Image.open(p)
+        if getattr(im, "is_animated", False):
+            im.seek(0)
+        w, h = im.size
+        long_side = max(w, h)
+        need_resize = long_side > _COMPRESS_MAX_SIDE
+        need_reencode = len(raw) >= _COMPRESS_REENCODE_MIN_BYTES
+        if not need_resize and not need_reencode:
+            return base64.b64encode(raw).decode("ascii"), mime
+
+        # Flatten alpha onto white before JPEG (avoids black fringes from raw RGBA→RGB)
+        if im.mode in ("RGBA", "LA") or (
+            im.mode == "P" and "transparency" in getattr(im, "info", {})
+        ):
+            rgba = im.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.split()[-1])
+            im = background
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+
+        if need_resize:
+            resample = (
+                Image.Resampling.LANCZOS
+                if hasattr(Image, "Resampling")
+                else Image.LANCZOS
+            )
+            im.thumbnail((_COMPRESS_MAX_SIDE, _COMPRESS_MAX_SIDE), resample)
+
+        buf = BytesIO()
+        im.save(
+            buf,
+            format="JPEG",
+            quality=_COMPRESS_JPEG_QUALITY,
+            optimize=True,
+            progressive=True,
+        )
+        compressed = buf.getvalue()
+        if len(compressed) < len(raw):
+            print(
+                f"[vision] compressed {p.name}: {len(raw)} -> {len(compressed)} bytes "
+                f"(max_side={_COMPRESS_MAX_SIDE}, q={_COMPRESS_JPEG_QUALITY}"
+                f"{', resized' if need_resize else ', reencode-only'})",
+                file=sys.stderr,
+            )
+            return base64.b64encode(compressed).decode("ascii"), "image/jpeg"
+    except Exception as exc:
+        print(f"[vision] compress skipped for {path}: {exc}", file=sys.stderr)
+    return base64.b64encode(raw).decode("ascii"), mime
+
+
+def file_to_data_url(
+    path: str,
+    max_bytes: int | None = None,
+    *,
+    compress: bool = False,
+) -> str:
+    """Build a data URL. For images, set compress=True to apply vision-safe compression."""
+    import base64
+
+    resolved = normalize_path(path) or path
+    p = Path(resolved)
+    if not p.exists():
+        raise FileNotFoundError(f"Not found: {path}")
+    if compress and p.suffix.lower() in {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+    }:
+        b64, mime = load_image_payload(str(p), compress=True)
+        # rough size of decoded payload
+        approx = (len(b64) * 3) // 4
+        if max_bytes is not None and approx > max_bytes:
+            raise ValueError(
+                f"File too large for data URL ({approx} bytes > {max_bytes}). "
+                "Use a public URL or a smaller file."
+            )
+        return f"data:{mime};base64,{b64}"
+
     if max_bytes is not None:
         try:
             size = p.stat().st_size
@@ -171,7 +296,6 @@ def file_to_data_url(path: str, max_bytes: int | None = None) -> str:
             f"File too large for data URL ({len(raw)} bytes > {max_bytes}). "
             "Use a public URL or a smaller file."
         )
-    import base64
     b64 = base64.b64encode(raw).decode("ascii")
     return f"data:{mime_for_path(str(p))};base64,{b64}"
 

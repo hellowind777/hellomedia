@@ -2,12 +2,12 @@
 """
 HelloMedia — Media understanding (image / video / audio).
 
-- image: multimodal chat (same as vision path)
+- image: multimodal chat (same clarity-preserving path as vision.py)
 - video: multimodal chat with video_url when supported; optional STT of soundtrack not required
 - audio: STT first (via audio channels), then optional LLM summary with --prompt
 
-Host model should try native media first; this script is the external fallback.
-Pure stdlib.
+Default routing assumes the host model has no vision: call this skill for media understand.
+Pure stdlib (Pillow optional for image compress).
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ from _common import (  # noqa: E402
     normalize_base_url,
     normalize_path,
 )
+
+# Image understand uses the same clarity-preserving compress path as vision.py
 
 # Keep video inline under ~15MB for chat payloads
 _MAX_VIDEO_INLINE = 15 * 1024 * 1024
@@ -71,14 +73,21 @@ def _chat_openai(creds: dict, content: list, max_tokens: int, timeout: float, re
     )
 
 
-def understand_image(channels, prompt, image, max_tokens, timeout, retries):
+def understand_image(channels, prompt, image, max_tokens, timeout, retries, *, compress=True):
     # Prefer vision-capable channels
     for ch in channels:
         creds = channel_creds(ch, "vision")
         if not creds["model"] or not creds["api_key"]:
             continue
         try:
-            url = _to_url(image, max_bytes=20 * 1024 * 1024)
+            if isinstance(image, str) and image.startswith(("http://", "https://", "data:")):
+                url = image
+            else:
+                p = normalize_path(image)
+                if not p or not Path(p).exists():
+                    return False, {"error": f"Not found: {image}"}
+                # Clarity-preserving compress (shared with vision.py) then data URL
+                url = file_to_data_url(p, max_bytes=20 * 1024 * 1024, compress=compress)
         except Exception as e:
             return False, {"error": str(e)}
         content = [
@@ -250,6 +259,11 @@ def main():
     parser.add_argument("--image", default=None)
     parser.add_argument("--video", default=None)
     parser.add_argument("--audio", default=None)
+    parser.add_argument(
+        "--from-clipboard",
+        action="store_true",
+        help="Capture OS clipboard image (equivalent to --image after clipboard save)",
+    )
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output", default="-")
     parser.add_argument("--max-tokens", type=int, default=None)
@@ -261,11 +275,28 @@ def main():
         action="store_true",
         help="Print channel plan without calling the API",
     )
+    parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        help="Disable optional image compression for --image (Pillow path)",
+    )
     args = parser.parse_args()
 
-    modalities = [m for m in (args.image, args.video, args.audio) if m]
+    image_arg = args.image
+    clipboard_meta = None
+    if args.from_clipboard:
+        from _clipboard import capture_clipboard_image  # noqa: E402
+
+        clipboard_meta = capture_clipboard_image()
+        if not clipboard_meta.get("ok"):
+            fail(clipboard_meta)
+        image_arg = clipboard_meta["path"]
+
+    modalities = [m for m in (image_arg, args.video, args.audio) if m]
     if len(modalities) != 1:
-        fail({"error": "Provide exactly one of --image, --video, or --audio"})
+        fail({
+            "error": "Provide exactly one of --image, --from-clipboard, --video, or --audio",
+        })
 
     try:
         vision_chs, defaults = load_channels("vision")
@@ -287,9 +318,9 @@ def main():
         audio_chs = [c for c in audio_chs if c.get("priority") == args.channel]
 
     if args.dry_run:
-        modality = "image" if args.image else ("video" if args.video else "audio")
+        modality = "image" if image_arg else ("video" if args.video else "audio")
         chs = audio_chs if modality == "audio" else vision_chs
-        emit_json({
+        dry = {
             "ok": True,
             "dry_run": True,
             "modality": modality,
@@ -298,6 +329,7 @@ def main():
             "timeout_seconds": timeout,
             "retry_count": retries,
             "channel_count": len(chs),
+            "from_clipboard": bool(args.from_clipboard),
             "channels": [
                 {
                     "name": c.get("name"),
@@ -308,16 +340,32 @@ def main():
                 }
                 for c in chs
             ],
-        }, args.output)
+        }
+        if clipboard_meta and clipboard_meta.get("ok"):
+            dry["clipboard_path"] = clipboard_meta.get("path")
+        emit_json(dry, args.output)
         return
 
     try:
-        if args.image:
+        if image_arg:
             if not vision_chs:
                 fail({"error": "No vision channels configured"})
             ok, result = understand_image(
-                vision_chs, args.prompt, args.image, max_tokens, timeout, retries
+                vision_chs,
+                args.prompt,
+                image_arg,
+                max_tokens,
+                timeout,
+                retries,
+                compress=not args.no_compress,
             )
+            if ok and clipboard_meta and clipboard_meta.get("ok"):
+                result["_clipboard"] = {
+                    "path": clipboard_meta.get("path"),
+                    "backend": clipboard_meta.get("backend"),
+                    "source": clipboard_meta.get("source"),
+                    "bytes": clipboard_meta.get("bytes"),
+                }
         elif args.video:
             if not vision_chs:
                 fail({"error": "No vision channels configured for video understanding"})

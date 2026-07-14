@@ -269,10 +269,38 @@ def main():
         action="store_true",
         help="Probe xAI api/imgen/vidgen connectivity (uses proxy if configured)",
     )
+    parser.add_argument(
+        "--clipboard",
+        action="store_true",
+        help="Probe OS clipboard image backends (no image dump; optional capture with --clipboard-capture)",
+    )
+    parser.add_argument(
+        "--clipboard-capture",
+        action="store_true",
+        help="With --clipboard, also try capturing the current clipboard image",
+    )
     args = parser.parse_args()
 
     if args.capabilities:
         print(json.dumps(capabilities_dict(), ensure_ascii=False, indent=2))
+        return
+
+    if args.clipboard or args.clipboard_capture:
+        from _clipboard import capture_clipboard_image, probe_clipboard_backends
+
+        report = {
+            "ok": True,
+            "clipboard": probe_clipboard_backends(),
+        }
+        if args.clipboard_capture:
+            cap = capture_clipboard_image()
+            report["capture"] = cap
+            report["ok"] = bool(cap.get("ok"))
+        else:
+            report["ok"] = bool(report["clipboard"].get("any_backend"))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if not report.get("ok"):
+            sys.exit(2)
         return
 
     if args.xai_network:
