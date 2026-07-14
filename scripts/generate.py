@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-HelloMultimodal — Self-contained image generation engine.
-Multi-endpoint fallback: responses → images(-edits) → chat.
-Configured via config.json. No external script dependency.
+HelloMedia — image generation engine.
+
+Multi-endpoint fallback: responses → images(-edits) → chat; optional sd-webui.
+Credential sources (first match wins per field where applicable):
+  CLI flags → env → skill config.json generate channels → Codex/Hermes/OpenClaw runtime.
 """
 
 import argparse
@@ -20,6 +22,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+# Runtime auth discovery (Codex / Hermes / OpenClaw) — first-class skill module
+try:
+    from scripts import _auth_discovery as _auth  # type: ignore
+except Exception:
+    try:
+        import _auth_discovery as _auth  # type: ignore
+    except Exception:
+        _auth = None  # type: ignore
 
 # Ensure UTF-8 on Windows — must be at module level before any print() call
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
@@ -44,11 +55,14 @@ DEFAULT_AUTO_TIMEOUT = 360
 MIN_TIMEOUT = 180
 MAX_TIMEOUT = 600
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+def _skill_version() -> str:
+    try:
+        return (SKILL_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+USER_AGENT = f"hellomedia/{_skill_version()}"
 
 RETRY_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 # 4xx errors that should never be retried (permanent failures)
@@ -268,8 +282,31 @@ def _normalize_base_url(value):
     return urlunparse(normalized).rstrip("/")
 
 
-def _build_endpoint_urls(base_url, endpoint):
-    """Return ordered list of (style, url) variants to try."""
+def _build_endpoint_urls(base_url, endpoint, auth=None):
+    """Return ordered list of (style, url) variants to try.
+
+    Uses style_hint / local-proxy awareness when auth context is present
+    (full Codex/local-relay path probing).
+    """
+    auth = auth or {}
+    # Prefer full variant builder when auth discovery is available
+    if _auth is not None:
+        try:
+            preferred_style = auth.get("endpoint_style") or auth.get("endpoint_style_hint")
+            allow_plain = bool(
+                auth.get("is_local_codex_proxy")
+                or auth.get("endpoint_style_hint") == "plain"
+                or (_auth.is_localish_base_url(base_url) if hasattr(_auth, "is_localish_base_url") else False)
+            )
+            return _auth.build_endpoint_url_variants(
+                base_url,
+                endpoint,
+                style_hint=preferred_style if isinstance(preferred_style, str) else None,
+                allow_plain_variant=allow_plain,
+            )
+        except Exception:
+            pass
+
     suffix = ENDPOINT_PATH_SUFFIXES[endpoint]
     parsed = urlparse(base_url.rstrip("/"))
     root_path = _strip_endpoint_suffixes(parsed.path)
@@ -593,7 +630,17 @@ def normalize_resolution(value):
 # ============================================================================
 # HTTP helpers
 # ============================================================================
-def _request_headers(api_key):
+def _request_headers(api_key, auth=None):
+    """Build request headers; attach Codex attribution when auth context needs it."""
+    if auth and _auth is not None and (
+        auth.get("auth_mode") in {"codex-oauth", "codex-agent-identity"}
+        or auth.get("is_codex_backend")
+        or auth.get("is_local_codex_proxy")
+    ):
+        try:
+            return _auth.request_headers(auth)
+        except Exception:
+            pass
     return {
         "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
@@ -721,10 +768,10 @@ def _run_with_retries(label, func, max_attempts, base_delay, cooldown, verbose):
 # ============================================================================
 def _request_via_images(base_url, api_key, model, prompt, size, quality, fmt,
                         timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                        seed=None, thinking=None):
+                        seed=None, thinking=None, auth=None):
     """POST /v1/images/generations — full → minimal payload fallback."""
-    headers = _request_headers(api_key)
-    urls = _build_endpoint_urls(base_url, "images")
+    headers = _request_headers(api_key, auth=auth)
+    urls = _build_endpoint_urls(base_url, "images", auth=auth)
     last_exc = None
 
     for style, url in urls:
@@ -774,10 +821,10 @@ def _request_via_images(base_url, api_key, model, prompt, size, quality, fmt,
 
 def _request_via_images_edits(base_url, api_key, model, prompt, image_refs, size, quality, fmt,
                               timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                              seed=None, thinking=None):
+                              seed=None, thinking=None, auth=None):
     """POST /v1/images/edits — multipart → JSON fallback."""
-    headers = _request_headers(api_key)
-    urls = _build_endpoint_urls(base_url, "images-edits")
+    headers = _request_headers(api_key, auth=auth)
+    urls = _build_endpoint_urls(base_url, "images-edits", auth=auth)
     last_exc = None
     ref_paths = [Path(p).expanduser() for p in image_refs]
 
@@ -836,10 +883,10 @@ def _request_via_images_edits(base_url, api_key, model, prompt, image_refs, size
 
 def _request_via_responses(base_url, api_key, model, prompt, image_refs, size, quality, fmt,
                            timeout, max_attempts, base_delay, cooldown, verbose,
-                           responses_mode, trace, seed=None, thinking=None):
+                           responses_mode, trace, seed=None, thinking=None, auth=None):
     """POST /v1/responses with image_generation tool. SSE → JSON fallback."""
-    headers = _request_headers(api_key)
-    urls = _build_endpoint_urls(base_url, "responses")
+    headers = _request_headers(api_key, auth=auth)
+    urls = _build_endpoint_urls(base_url, "responses", auth=auth)
     last_exc = None
 
     tool: dict[str, Any] = {"type": "image_generation", "size": size,
@@ -922,10 +969,10 @@ def _request_via_responses(base_url, api_key, model, prompt, image_refs, size, q
 
 def _request_via_chat(base_url, api_key, model, prompt, image_refs, size, quality, fmt,
                       timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                      seed=None, thinking=None):
+                      seed=None, thinking=None, auth=None):
     """POST /v1/chat/completions — compat → legacy payload fallback."""
-    headers = _request_headers(api_key)
-    urls = _build_endpoint_urls(base_url, "chat")
+    headers = _request_headers(api_key, auth=auth)
+    urls = _build_endpoint_urls(base_url, "chat", auth=auth)
     last_exc = None
 
     for style, url in urls:
@@ -1047,6 +1094,74 @@ def _request_via_sd_webui(base_url, prompt, image_refs, size, steps, cfg_scale,
     return base64.b64decode(images[0]), 1, endpoint.split("/")[-1]
 
 
+def _request_via_fal(base_url, api_key, prompt, image_refs, size, timeout, verbose):
+    """Minimal fal.run / fal.queue-style image generation.
+
+    Expects base_url to be the full model endpoint (e.g. https://fal.run/fal-ai/...).
+    Auth: Authorization: Key <api_key>
+    """
+    m = re.match(r"(\d+)x(\d+)", size or "")
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (1024, 1024)
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "image_size": {"width": w, "height": h},
+        "num_images": 1,
+        "output_format": "png",
+    }
+    if image_refs:
+        # common edit pattern: pass first ref as image_url data URL
+        ref = Path(image_refs[0]).expanduser()
+        b64 = base64.b64encode(ref.read_bytes()).decode("ascii")
+        mime = mimetypes.guess_type(str(ref))[0] or "image/png"
+        payload["image_url"] = f"data:{mime};base64,{b64}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if api_key:
+        # fal accepts "Key xxx" ; some relays still use Bearer
+        headers["Authorization"] = f"Key {api_key}" if not api_key.lower().startswith("key ") else api_key
+
+    url = (base_url or "").rstrip("/")
+    if not url:
+        raise RequestFailure("fal base_url is empty")
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    _progress(f"fal POST {url}", verbose=verbose)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    # Response shapes: {images:[{url|file_data|content}]}, or nested data
+    candidates = []
+    if isinstance(data, dict):
+        for key in ("images", "image", "output", "data"):
+            val = data.get(key)
+            if isinstance(val, list):
+                candidates.extend(val)
+            elif isinstance(val, dict):
+                candidates.append(val)
+            elif isinstance(val, str):
+                candidates.append({"url": val})
+    for item in candidates:
+        if not isinstance(item, dict):
+            if isinstance(item, str) and item.startswith(("http://", "https://", "data:")):
+                src = ("url", item) if item.startswith("http") else ("b64", item.split(",", 1)[-1] if "," in item else item)
+                return _decode_image_bytes(src, timeout), 1, "fal"
+            continue
+        for k in ("url", "image_url", "file_data", "content", "b64_json", "base64"):
+            v = item.get(k)
+            if not v:
+                continue
+            if isinstance(v, str) and v.startswith(("http://", "https://")):
+                return _decode_image_bytes(("url", v), timeout), 1, "fal"
+            if isinstance(v, str):
+                raw = v.split(",", 1)[-1] if v.startswith("data:") else v
+                return _decode_image_bytes(("b64", raw), timeout), 1, "fal"
+    raise RequestFailure(f"fal returned no recognizable image payload: {json.dumps(data)[:300]}")
+
+
 # ============================================================================
 # Multi-endpoint orchestrator
 # ============================================================================
@@ -1054,15 +1169,28 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                    prompt, size, quality, fmt, timeout, max_attempts=3, base_delay=2.0,
                    cooldown=2.5, verbose=False, image_refs=None,
                    endpoint_mode="auto", responses_mode="auto", seed=None, thinking=None,
-                   sd_steps=30, sd_cfg_scale=7.5, sd_sampler="DPM++ 2M Karras"):
+                   sd_steps=30, sd_cfg_scale=7.5, sd_sampler="DPM++ 2M Karras",
+                   auth=None):
     """
     Generate one image through the optimal endpoint path.
     Returns (image_bytes, transport, total_attempts, trace).
     """
     trace: list[dict[str, Any]] = []
     is_openai = _is_official_openai(base_url)
+    auth = auth or {}
+    wire_api = (auth.get("wire_api") or "").lower()
+    is_local_proxy = bool(auth.get("is_local_codex_proxy"))
+    is_codex_backend = bool(auth.get("is_codex_backend"))
+    prefer_responses = bool(
+        wire_api == "responses" or is_local_proxy or is_codex_backend or is_openai
+    )
+    allow_chat = (
+        not is_openai
+        and not is_codex_backend
+        and not is_local_proxy
+    )
 
-    # ---- SD WebUI shortcut ----
+    # ---- Specialized providers ----
     if endpoint_mode == "sd-webui":
         image_bytes, attempts, mode = _request_via_sd_webui(
             base_url, prompt, image_refs, size,
@@ -1070,7 +1198,13 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
         trace.append({"endpoint": f"sd-webui:{mode}", "attempts": attempts, "status": "success"})
         return image_bytes, f"sd-webui:{mode}", attempts, trace
 
-    # ---- Build ordered endpoint list ----
+    if endpoint_mode == "fal":
+        image_bytes, attempts, mode = _request_via_fal(
+            base_url, api_key, prompt, image_refs, size, timeout, verbose)
+        trace.append({"endpoint": f"fal:{mode}", "attempts": attempts, "status": "success"})
+        return image_bytes, f"fal:{mode}", attempts, trace
+
+    # ---- Build ordered endpoint list (wire_api / local proxy awareness) ----
     if endpoint_mode == "images":
         order = ["images-edits" if image_refs else "images"]
     elif endpoint_mode == "responses":
@@ -1078,15 +1212,16 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
     elif endpoint_mode == "chat":
         order = ["chat"]
     elif image_refs:
-        # With reference images, responses handles them natively
         order = ["responses", "images-edits"]
-        if not is_openai:
+        if allow_chat:
             order.append("chat")
-    elif is_openai:
+    elif prefer_responses:
         order = ["responses", "images"]
+        if allow_chat:
+            order.append("chat")
     else:
         order = ["images", "responses"]
-        if not is_openai:
+        if allow_chat:
             order.append("chat")
 
     if endpoint_mode == "images" and not image_refs and "images-edits" in order:
@@ -1101,7 +1236,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                 image_bytes, attempts, _ = _request_via_images(
                     base_url, api_key, images_model, prompt,
                     size, quality, fmt, timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                    seed=seed, thinking=thinking)
+                    seed=seed, thinking=thinking, auth=auth)
                 total_attempts += attempts
                 return image_bytes, "images", total_attempts, trace
 
@@ -1109,7 +1244,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                 image_bytes, attempts, _ = _request_via_images_edits(
                     base_url, api_key, images_model, prompt, image_refs,
                     size, quality, fmt, timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                    seed=seed, thinking=thinking)
+                    seed=seed, thinking=thinking, auth=auth)
                 total_attempts += attempts
                 return image_bytes, "images-edits", total_attempts, trace
 
@@ -1117,7 +1252,7 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                 image_bytes, attempts, mode = _request_via_responses(
                     base_url, api_key, responses_model, prompt, image_refs,
                     size, quality, fmt, timeout, max_attempts, base_delay, cooldown,
-                    verbose, responses_mode, trace, seed=seed, thinking=thinking)
+                    verbose, responses_mode, trace, seed=seed, thinking=thinking, auth=auth)
                 total_attempts += attempts
                 return image_bytes, f"responses:{mode}", total_attempts, trace
 
@@ -1125,15 +1260,21 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
                 image_bytes, attempts, _ = _request_via_chat(
                     base_url, api_key, chat_model, prompt, image_refs,
                     size, quality, fmt, timeout, max_attempts, base_delay, cooldown, verbose, trace,
-                    seed=seed, thinking=thinking)
+                    seed=seed, thinking=thinking, auth=auth)
                 total_attempts += attempts
                 return image_bytes, "chat", total_attempts, trace
 
         except RequestFailure as exc:
             total_attempts += exc.attempts or 0
             last_error = exc
+            # Local Codex/OpenAI-auth proxy: fail fast on permission errors
+            if is_local_proxy and exc.status in {401, 403}:
+                raise
             # Stop on permission/auth failures for non-official endpoints
             if exc.status in {401, 402, 403} and not is_openai:
+                raise
+            # Do not burn chat fallback on local auth proxies
+            if is_local_proxy and ep != "chat":
                 raise
             trace.append({"endpoint": ep, "status": "fallback",
                           "attempts": exc.attempts, "error": str(exc)})
@@ -1150,8 +1291,8 @@ def generate_image(base_url, api_key, images_model, responses_model, chat_model,
 def load_channels():
     cfg_path = SKILL_DIR / "config.json"
     if not cfg_path.exists():
-        print(json.dumps({"error": f"config.json not found at {cfg_path}"}, ensure_ascii=False), file=sys.stderr)
-        sys.exit(1)
+        # Allow pure runtime auth (Codex/env/CLI) without skill config.json
+        return [], {}
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     channels = [c for c in cfg.get("channels", []) if c.get("generate")]
     channels.sort(key=lambda c: c.get("priority", 99))
@@ -1159,14 +1300,55 @@ def load_channels():
 
 
 def resolve_channel_params(channel):
+    """Resolve channel credentials without KeyError when model keys are omitted."""
+    name = channel.get("name") or "channel"
+    base_url = channel.get("image_base_url") or channel.get("base_url") or ""
+    api_key = channel.get("image_api_key") or channel.get("api_key") or ""
+    fmt = (channel.get("api_format") or "openai").lower()
+    raw_image = channel.get("image_model")
+    raw_model = channel.get("model")
+    # Prefer image_model; for sd-webui/fal allow blank model (path embeds model)
+    if raw_image not in (None, ""):
+        primary = raw_image
+    elif raw_model not in (None, ""):
+        primary = raw_model
+    elif fmt in {"sd-webui", "fal"}:
+        primary = ""
+    else:
+        primary = DEFAULT_IMAGES_MODEL
     return {
-        "name": channel["name"],
-        "base_url": channel.get("image_base_url") or channel["base_url"],
-        "api_key": channel.get("image_api_key") or channel["api_key"],
-        "images_model": channel.get("image_model") or channel["model"],
-        "responses_model": channel.get("responses_model") or channel.get("image_model") or channel["model"],
-        "chat_model": channel.get("chat_model") or channel.get("image_model") or channel["model"],
+        "name": name,
+        "base_url": base_url,
+        "api_key": api_key,
+        "images_model": primary if primary != "" or fmt in {"sd-webui", "fal"} else DEFAULT_IMAGES_MODEL,
+        "responses_model": (
+            channel.get("responses_model")
+            or (raw_image if raw_image not in (None, "") else None)
+            or (raw_model if raw_model not in (None, "") else None)
+            or DEFAULT_RESPONSES_MODEL
+        ),
+        "chat_model": (
+            channel.get("chat_model")
+            or (raw_image if raw_image not in (None, "") else None)
+            or (raw_model if raw_model not in (None, "") else None)
+            or DEFAULT_CHAT_MODEL
+        ),
+        "api_format": fmt,
+        "wire_api": channel.get("wire_api"),
+        "requires_openai_auth": channel.get("requires_openai_auth"),
     }
+
+
+def resolve_endpoint_mode(args_mode: str, api_format: str) -> str:
+    """Map channel api_format onto endpoint_mode when user left auto."""
+    if args_mode and args_mode != "auto":
+        return args_mode
+    fmt = (api_format or "openai").lower()
+    if fmt == "sd-webui":
+        return "sd-webui"
+    if fmt == "fal":
+        return "fal"
+    return "auto"
 
 
 def _read_prompt(args):
@@ -1181,11 +1363,28 @@ def _read_prompt(args):
 # Main
 # ============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="HelloMultimodal Image Generation")
+    parser = argparse.ArgumentParser(description="HelloMedia Image Generation")
     parser.add_argument("--prompt", default=None, help="Generation prompt. Use '-' for stdin.")
     parser.add_argument("--prompt-file", default=None, help="Read prompt from UTF-8 file")
     parser.add_argument("--output", default="./output/generated.png", help="Output path")
     parser.add_argument("--channel", type=int, default=None, help="Force specific channel by priority")
+    # Runtime / CLI credentials (skill is self-contained without separate image tools)
+    parser.add_argument("--base-url", default=None, help="Override channel base URL")
+    parser.add_argument("--api-key", default=None, help="Override channel API key")
+    parser.add_argument("--model", default=None, help="Override images model")
+    parser.add_argument("--responses-model", default=None, help="Override responses model")
+    parser.add_argument("--chat-model", default=None, help="Override chat fallback model")
+    parser.add_argument("--provider", default=None, help="Provider name from ~/.codex/config.toml")
+    parser.add_argument("--codex-home", default=None, help="Codex home (default ~/.codex)")
+    parser.add_argument("--no-codex-config", action="store_true", help="Do not read ~/.codex config")
+    parser.add_argument("--no-runtime-auth", action="store_true",
+                        help="Disable Codex/Hermes/OpenClaw auth discovery (config.json / explicit flags only)")
+    parser.add_argument("--hermes-home", default=None, help="Hermes home for auth discovery")
+    parser.add_argument("--openclaw-state-dir", default=None)
+    parser.add_argument("--openclaw-agent-dir", default=None)
+    parser.add_argument("--chatgpt-account-id", default=None)
+    parser.add_argument("--client-version", default=None)
+    parser.add_argument("--originator", default=None)
     parser.add_argument("--size", default=None, help="Override auto-detected size (WxH or 'auto')")
     parser.add_argument("--max-resolution", choices=("2k", "4k", "1536", "2048", "3840"),
                         default=None, help="Provider resolution ceiling")
@@ -1197,8 +1396,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Generation seed for semi-deterministic output")
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="Number of images to generate")
     parser.add_argument("--image", action="append", default=None, help="Reference image path (repeatable)")
-    parser.add_argument("--endpoint-mode", choices=("auto", "images", "responses", "chat", "sd-webui"), default="auto",
-                        help="Force specific endpoint protocol (sd-webui for A1111 Stable Diffusion)")
+    parser.add_argument("--endpoint-mode", choices=("auto", "images", "responses", "chat", "sd-webui", "fal"), default="auto",
+                        help="Endpoint protocol (auto maps api_format sd-webui/fal; else OpenAI-compatible cascade)")
     parser.add_argument("--responses-mode", choices=("auto", "stream", "json"), default="auto",
                         help="How /v1/responses should be consumed")
     parser.add_argument("--sd-steps", type=int, default=30, help="SD WebUI sampling steps (default: 30)")
@@ -1232,14 +1431,83 @@ def main():
     layout_min_confidence = args.layout_min_confidence
 
     targets = [c for c in channels if args.channel is None or c["priority"] == args.channel]
+
+    # Runtime auth: Codex/Hermes/OpenClaw + CLI. Skill config.json channels preferred when present.
+    runtime_auth = {}
+    runtime_cfg = {}
+    codex_home = None
+    if _auth is not None and not args.no_runtime_auth:
+        codex_home = Path(args.codex_home).expanduser() if args.codex_home else _auth.default_codex_home()
+        if not args.no_codex_config:
+            try:
+                runtime_cfg = _auth.read_codex_config(codex_home, args.provider)
+            except Exception as exc:
+                _progress(f"codex config read skipped: {exc}", verbose=verbose)
+                runtime_cfg = {}
+
     if not targets:
-        print(json.dumps({"error": "No matching generate channels"}, ensure_ascii=False), file=sys.stderr)
-        sys.exit(1)
+        # Fall back to pure runtime credentials when no generate channel is configured
+        if _auth is None or args.no_runtime_auth:
+            print(json.dumps({"error": "No matching generate channels"}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(1)
+        raw_base = args.base_url or (_auth.first_value(_auth.BASE_URL_ENV) if _auth else None) or runtime_cfg.get("base_url")
+        if not raw_base:
+            print(json.dumps({"error": "No generate channels and no --base-url / Codex base_url"}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(1)
+        base_url = _auth.normalize_base_url(raw_base)
+        # Build a synthetic channel
+        ns = argparse.Namespace(
+            api_key=args.api_key,
+            chatgpt_account_id=args.chatgpt_account_id,
+            originator=args.originator,
+            client_version=args.client_version,
+            hermes_home=args.hermes_home,
+            openclaw_agent_dir=args.openclaw_agent_dir,
+            openclaw_state_dir=args.openclaw_state_dir,
+            base_url=base_url,
+        )
+        runtime_auth = _auth.resolve_auth_context(ns, runtime_cfg, codex_home)
+        api_key = runtime_auth.get("api_key")
+        images_model = (
+            args.model
+            or (_auth.first_value(_auth.MODEL_ENV) if _auth else None)
+            or runtime_cfg.get("images_model")
+            or DEFAULT_IMAGES_MODEL
+        )
+        responses_model = args.responses_model or runtime_cfg.get("responses_model") or DEFAULT_RESPONSES_MODEL
+        chat_model = args.chat_model or runtime_cfg.get("chat_model") or images_model
+        synthetic = {
+            "name": f"runtime:{runtime_auth.get('auth_source') or 'cli'}",
+            "base_url": base_url,
+            "api_key": api_key or "",
+            "model": images_model,
+            "image_model": images_model,
+            "responses_model": responses_model,
+            "chat_model": chat_model,
+            "generate": True,
+            "priority": 0,
+            "wire_api": runtime_auth.get("wire_api") or runtime_cfg.get("wire_api"),
+            "requires_openai_auth": runtime_auth.get("requires_openai_auth") or runtime_cfg.get("requires_openai_auth"),
+        }
+        targets = [synthetic]
+        channels = targets
 
     # For dry-run, show info for first matching channel
     if args.dry_run:
         ch = targets[0]
         params = resolve_channel_params(ch)
+        # CLI overrides
+        if args.base_url:
+            params["base_url"] = args.base_url
+        if args.api_key:
+            params["api_key"] = args.api_key
+        if args.model:
+            params["images_model"] = args.model
+        if args.responses_model:
+            params["responses_model"] = args.responses_model
+        if args.chat_model:
+            params["chat_model"] = args.chat_model
+        effective_ep = resolve_endpoint_mode(args.endpoint_mode, params.get("api_format") or "openai")
         # ---- Determine effective timeout ----
         _size = args.size or "auto"
         _timeout = "auto (will be computed at runtime)" if _size == "auto" else resolve_timeout(_size, has_ref=bool(args.image), override=timeout_override)
@@ -1252,7 +1520,10 @@ def main():
             "images_model": params["images_model"],
             "responses_model": params["responses_model"],
             "chat_model": params["chat_model"],
+            "api_format": params.get("api_format"),
             "endpoint_mode": args.endpoint_mode,
+            "effective_endpoint_mode": effective_ep,
+            "generate_channel_count": len(targets),
             "responses_mode": args.responses_mode,
             "size": args.size or "auto",
             "max_resolution": max_resolution,
@@ -1264,7 +1535,32 @@ def main():
             "layout_analysis": layout_analysis,
             "image_refs": args.image,
             "count": args.count,
+            "runtime_auth_available": _auth is not None and not args.no_runtime_auth,
+            "provider": args.provider or (runtime_cfg.get("provider") if runtime_cfg else None),
         }
+        if _auth is not None and not args.no_runtime_auth:
+            try:
+                b = _auth.normalize_base_url(params["base_url"]) if params.get("base_url") else ""
+                ns = argparse.Namespace(
+                    api_key=args.api_key or params.get("api_key"),
+                    chatgpt_account_id=args.chatgpt_account_id,
+                    originator=args.originator,
+                    client_version=args.client_version,
+                    hermes_home=args.hermes_home,
+                    openclaw_agent_dir=args.openclaw_agent_dir,
+                    openclaw_state_dir=args.openclaw_state_dir,
+                    base_url=b,
+                )
+                ch_home = codex_home or _auth.default_codex_home()
+                ac = _auth.resolve_auth_context(ns, runtime_cfg or {}, ch_home)
+                preview["auth_mode"] = ac.get("auth_mode")
+                preview["auth_source"] = ac.get("auth_source")
+                preview["has_api_key"] = bool(ac.get("api_key") or params.get("api_key"))
+                preview["wire_api"] = ac.get("wire_api")
+                preview["is_local_codex_proxy"] = ac.get("is_local_codex_proxy")
+                preview["is_codex_backend"] = ac.get("is_codex_backend")
+            except Exception as exc:
+                preview["auth_probe_error"] = str(exc)
         print(json.dumps(preview, ensure_ascii=False, indent=2))
         return  # after dry-run
 
@@ -1312,93 +1608,194 @@ def main():
     errors: list[str] = []
     all_trace: list[dict[str, Any]] = []
 
-    # Pick the first matching channel as the workhorse for all images
-    channel = targets[0]
-    params = resolve_channel_params(channel)
-    label = f"{params['name']} ({params['images_model']})"
-    _progress(f"Using {label}...", verbose=verbose)
+    def prepare_channel(channel: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
+        """Return (params, auth_ctx, endpoint_mode) for one generate channel."""
+        params = resolve_channel_params(channel)
+        if args.base_url:
+            params["base_url"] = args.base_url
+        if args.model:
+            params["images_model"] = args.model
+        if args.responses_model:
+            params["responses_model"] = args.responses_model
+        if args.chat_model:
+            params["chat_model"] = args.chat_model
+        if args.api_key:
+            params["api_key"] = args.api_key
 
-    if not params["base_url"] or not params["api_key"]:
-        print(json.dumps({"error": f"{label}: Missing base_url or api_key"}, ensure_ascii=False), file=sys.stderr)
-        sys.exit(1)
+        auth_ctx: dict[str, Any] = dict(runtime_auth) if runtime_auth else {}
+        if _auth is not None and not args.no_runtime_auth:
+            try:
+                base_for_auth = (
+                    _auth.normalize_base_url(params["base_url"]) if params.get("base_url") else ""
+                )
+            except Exception:
+                base_for_auth = (
+                    _normalize_base_url(params["base_url"]) if params.get("base_url") else ""
+                )
+            ns = argparse.Namespace(
+                api_key=params.get("api_key") or None,
+                chatgpt_account_id=args.chatgpt_account_id,
+                originator=args.originator,
+                client_version=args.client_version,
+                hermes_home=args.hermes_home,
+                openclaw_agent_dir=args.openclaw_agent_dir,
+                openclaw_state_dir=args.openclaw_state_dir,
+                base_url=base_for_auth,
+            )
+            cfg_for_auth = dict(runtime_cfg)
+            if params.get("wire_api"):
+                cfg_for_auth.setdefault("wire_api", params.get("wire_api"))
+            if params.get("requires_openai_auth") is not None:
+                cfg_for_auth.setdefault("requires_openai_auth", params.get("requires_openai_auth"))
+            ch_home = codex_home or _auth.default_codex_home()
+            try:
+                auth_ctx = _auth.resolve_auth_context(ns, cfg_for_auth, ch_home)
+            except Exception as exc:
+                _progress(f"runtime auth resolve skipped: {exc}", verbose=verbose)
+                auth_ctx = {
+                    "api_key": params.get("api_key"),
+                    "auth_mode": "skill-config",
+                    "auth_source": "config.json",
+                }
+            if auth_ctx.get("api_key"):
+                params["api_key"] = auth_ctx["api_key"]
+            if base_for_auth:
+                params["base_url"] = base_for_auth
+            if auth_ctx.get("wire_api") and not params.get("wire_api"):
+                params["wire_api"] = auth_ctx.get("wire_api")
+        else:
+            auth_ctx = {
+                "api_key": params.get("api_key"),
+                "auth_mode": "skill-config",
+                "auth_source": "config.json",
+                "wire_api": params.get("wire_api"),
+                "requires_openai_auth": params.get("requires_openai_auth"),
+            }
+
+        # channel wire_api into auth for endpoint ordering
+        if params.get("wire_api") and not auth_ctx.get("wire_api"):
+            auth_ctx["wire_api"] = params["wire_api"]
+        if params.get("requires_openai_auth") is not None:
+            auth_ctx["requires_openai_auth"] = params["requires_openai_auth"]
+
+        ep_mode = resolve_endpoint_mode(args.endpoint_mode, params.get("api_format") or "openai")
+        # sd-webui may not need api_key
+        needs_key = ep_mode not in {"sd-webui"}
+        if not params.get("base_url") or (needs_key and not params.get("api_key")):
+            raise RequestFailure(
+                f"{params['name']}: missing base_url"
+                + (" or api_key" if needs_key else "")
+            )
+        return params, auth_ctx, ep_mode
 
     started = time.time()
     results = []
     transports = []
     total_attempts = 0
     any_fallback = False
+    used_params = None
+    used_ep_mode = args.endpoint_mode
 
-    _progress(
-        f"start generation: images_model={params['images_model']}, responses_model={params['responses_model']}, "
-        f"chat_model={params['chat_model']}, size={size}, quality={quality}, endpoint_mode={args.endpoint_mode}, "
-        f"count={args.count}",
-        verbose=verbose,
-    )
-
-    for attempt in range(retry_count + 1):
-        if attempt > 0:
-            _progress(f"Retry batch {attempt}/{retry_count}...", verbose=verbose)
-            time.sleep(2)
-
+    # Multi-channel cascade: try each generate channel until success
+    last_channel_error = None
+    for ch_index, channel in enumerate(targets):
         try:
-            for idx, output_path in enumerate(output_paths, start=1):
-                _progress(f"generating image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
-                image_bytes, transport, attempts, trace = generate_image(
-                    base_url=_normalize_base_url(params["base_url"]),
-                    api_key=params["api_key"],
-                    images_model=params["images_model"],
-                    responses_model=params["responses_model"],
-                    chat_model=params["chat_model"],
-                    prompt=args.prompt,
-                    size=size,
-                    quality=quality,
-                    fmt=format_out,
-                    timeout=timeout,
-                    max_attempts=3,
-                    base_delay=2.0,
-                    cooldown=cooldown,
-                    verbose=verbose,
-                    image_refs=image_refs,
-                    endpoint_mode=args.endpoint_mode,
-                    responses_mode=args.responses_mode,
-                    seed=seed,
-                    thinking=thinking,
-                    sd_steps=args.sd_steps,
-                    sd_cfg_scale=args.sd_cfg_scale,
-                    sd_sampler=args.sd_sampler,
-                )
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(image_bytes)
-                results.append({
-                    "index": idx,
-                    "output": str(output_path),
-                    "transport": transport,
-                    "fallback_used": "fallback" in [t.get("status") for t in trace if t.get("status") == "fallback"],
-                    "attempts": attempts,
-                    "timeout_seconds": timeout,
-                    "bytes": len(image_bytes),
-                    "attempt_trace": trace,
-                    "markdown_image": f"![generated image]({str(output_path).replace(os.sep, '/')})",
-                })
-                all_trace.extend([{**item, "image_index": idx} for item in trace])
-                transports.append(transport)
-                total_attempts += attempts
-                any_fallback = any_fallback or any(
-                    t.get("status") == "fallback" for t in trace
-                )
-                _progress(f"saved image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
+            params, auth_ctx, ep_mode = prepare_channel(channel)
+        except RequestFailure as exc:
+            errors.append(str(exc))
+            all_trace.append({"channel": channel.get("name"), "status": "skip", "error": str(exc)})
+            last_channel_error = exc
+            continue
 
-            # All images generated successfully
+        label = f"{params['name']} ({params['images_model'] or ep_mode})"
+        _progress(f"Using {label} endpoint_mode={ep_mode}...", verbose=verbose)
+        used_params = params
+        used_ep_mode = ep_mode
+
+        channel_ok = False
+        for attempt in range(retry_count + 1):
+            if attempt > 0:
+                _progress(f"Retry batch {attempt}/{retry_count} on {label}...", verbose=verbose)
+                time.sleep(2)
+            try:
+                results = []
+                transports = []
+                total_attempts = 0
+                any_fallback = False
+                for idx, output_path in enumerate(output_paths, start=1):
+                    _progress(f"generating image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
+                    image_bytes, transport, attempts, trace = generate_image(
+                        base_url=_normalize_base_url(params["base_url"]),
+                        api_key=params["api_key"] or "",
+                        images_model=params["images_model"],
+                        responses_model=params["responses_model"],
+                        chat_model=params["chat_model"],
+                        prompt=args.prompt,
+                        size=size,
+                        quality=quality,
+                        fmt=format_out,
+                        timeout=timeout,
+                        max_attempts=3,
+                        base_delay=2.0,
+                        cooldown=cooldown,
+                        verbose=verbose,
+                        image_refs=image_refs,
+                        endpoint_mode=ep_mode,
+                        responses_mode=args.responses_mode,
+                        seed=seed,
+                        thinking=thinking,
+                        sd_steps=args.sd_steps,
+                        sd_cfg_scale=args.sd_cfg_scale,
+                        sd_sampler=args.sd_sampler,
+                        auth=auth_ctx,
+                    )
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(image_bytes)
+                    results.append({
+                        "index": idx,
+                        "output": str(output_path),
+                        "transport": transport,
+                        "fallback_used": any(t.get("status") == "fallback" for t in trace),
+                        "attempts": attempts,
+                        "timeout_seconds": timeout,
+                        "bytes": len(image_bytes),
+                        "attempt_trace": trace,
+                        "markdown_image": f"![generated image]({str(output_path).replace(os.sep, '/')})",
+                    })
+                    all_trace.extend([{**item, "image_index": idx, "channel": params["name"]} for item in trace])
+                    transports.append(transport)
+                    total_attempts += attempts
+                    any_fallback = any_fallback or any(t.get("status") == "fallback" for t in trace)
+                    _progress(f"saved image {idx}/{len(output_paths)} -> {output_path}", verbose=verbose)
+
+                channel_ok = True
+                break
+            except RequestFailure as exc:
+                errors.append(f"{label}: {exc}")
+                all_trace.append({
+                    "channel": params["name"], "attempt": attempt,
+                    "status": "failed", "error": str(exc),
+                })
+                last_channel_error = exc
+                _progress(f"batch attempt {attempt} failed on {label}: {exc}", verbose=verbose)
+                if exc.status in {401, 402, 403}:
+                    break  # try next channel
+                # permanent client errors other than auth → still try next channel after retries
+                continue
+
+        if channel_ok:
             elapsed = round(time.time() - started, 2)
             result = {
                 "ok": True,
                 "output": results[0]["output"] if len(results) == 1 else [r["output"] for r in results],
-                "channel": params["name"],
-                "images_model": params["images_model"],
-                "responses_model": params["responses_model"],
-                "chat_model": params["chat_model"],
+                "channel": used_params["name"] if used_params else None,
+                "images_model": used_params["images_model"] if used_params else None,
+                "responses_model": used_params["responses_model"] if used_params else None,
+                "chat_model": used_params["chat_model"] if used_params else None,
+                "endpoint_mode": used_ep_mode,
+                "api_format": used_params.get("api_format") if used_params else None,
                 "transport": transports[0] if len(set(transports)) == 1 else transports,
-                "fallback_used": any_fallback,
+                "fallback_used": any_fallback or ch_index > 0,
                 "attempts": total_attempts,
                 "attempt_trace": all_trace,
                 "count": args.count,
@@ -1413,22 +1810,20 @@ def main():
             print(f"Image(s) saved: {len(results)}/{args.count} ({elapsed}s)", file=sys.stderr)
             if not args.quiet:
                 print(json.dumps(result, ensure_ascii=False))
-            return  # success — exit main()
+            return
 
-        except RequestFailure as exc:
-            errors.append(f"{label}: {exc}")
-            all_trace.append({"channel": params["name"], "attempt": attempt,
-                              "status": "failed", "error": str(exc)})
-            _progress(f"batch attempt {attempt} failed: {exc}", verbose=verbose)
-            # Don't retry batch on permission errors for non-OpenAI
-            if exc.status in {401, 402, 403} and not _is_official_openai(_normalize_base_url(params["base_url"])):
-                break
+        _progress(f"channel {label} exhausted, trying next generate channel...", verbose=verbose)
 
-    # All retries exhausted
     elapsed = round(time.time() - started, 2)
     error_result = {
-        "ok": False, "error": "Generation failed after retries", "details": errors,
-        "size": size, "count": args.count, "elapsed_seconds": elapsed, "trace": all_trace,
+        "ok": False,
+        "error": "Generation failed after all channels/retries",
+        "details": errors,
+        "size": size,
+        "count": args.count,
+        "elapsed_seconds": elapsed,
+        "trace": all_trace,
+        "last_error": str(last_channel_error) if last_channel_error else None,
     }
     print(json.dumps(error_result, ensure_ascii=False), file=sys.stderr)
     sys.exit(1)

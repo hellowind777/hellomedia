@@ -1,6 +1,27 @@
 {
   "channels": [
     {
+      "name": "xAI Grok (full multimodal)",
+      "base_url": "https://api.x.ai",
+      "api_key": "xai-your-key",
+      "model": "grok-4.5",
+      "image_model": "grok-imagine-image",
+      "image_api_key": "",
+      "image_base_url": "",
+      "video_model": "grok-imagine-video",
+      "video_api_key": "",
+      "video_base_url": "",
+      "audio_api_key": "",
+      "audio_base_url": "",
+      "tts_voice": "eve",
+      "api_format": "xai",
+      "vision": true,
+      "generate": true,
+      "video": true,
+      "audio": true,
+      "priority": 1
+    },
+    {
       "name": "OpenAI",
       "base_url": "https://api.openai.com",
       "api_key": "sk-your-key",
@@ -8,12 +29,15 @@
       "image_model": "gpt-image-2",
       "image_api_key": "",
       "image_base_url": "",
-      "responses_model": "",
-      "chat_model": "",
+      "video_model": "",
+      "audio_model": "tts-1",
+      "tts_voice": "alloy",
       "api_format": "openai",
       "vision": true,
       "generate": true,
-      "priority": 1
+      "video": false,
+      "audio": true,
+      "priority": 2
     },
     {
       "name": "Kimi (Moonshot)",
@@ -21,89 +45,84 @@
       "api_key": "sk-your-moonshot-key",
       "model": "kimi-k2.6",
       "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": true,
       "generate": false,
-      "priority": 2
+      "video": false,
+      "audio": false,
+      "priority": 3
     },
     {
       "name": "MiniMax",
       "base_url": "https://api.minimax.io/v1",
       "api_key": "your-minimax-key",
       "model": "MiniMax-M3",
-      "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": true,
       "generate": false,
-      "priority": 3
+      "video": false,
+      "audio": false,
+      "priority": 4
     },
     {
       "name": "Claude (Anthropic)",
       "base_url": "https://api.anthropic.com",
       "api_key": "sk-ant-your-key",
       "model": "claude-sonnet-4-20250514",
-      "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "anthropic",
       "vision": true,
       "generate": false,
-      "priority": 4
+      "video": false,
+      "audio": false,
+      "priority": 5
     },
     {
       "name": "Gemini (via OpenAI-compatible proxy)",
       "base_url": "https://your-gemini-proxy.example.com/v1",
       "api_key": "your-proxy-key",
       "model": "gemini-2.5-flash",
-      "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": true,
       "generate": false,
-      "priority": 5
+      "video": false,
+      "audio": false,
+      "priority": 6
     },
     {
       "name": "Ollama Local",
       "base_url": "http://localhost:11434/v1",
       "api_key": "ollama",
       "model": "minicpm-v:latest",
-      "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": true,
       "generate": false,
-      "priority": 6
+      "video": false,
+      "audio": false,
+      "priority": 7
     },
     {
       "name": "vLLM / LocalAI / text-generation-webui",
       "base_url": "http://localhost:8000/v1",
       "api_key": "not-needed",
       "model": "Qwen2.5-VL-7B",
-      "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": true,
       "generate": false,
-      "priority": 7
+      "video": false,
+      "audio": false,
+      "priority": 8
     },
     {
       "name": "Stable Diffusion WebUI (A1111)",
       "base_url": "http://localhost:7860",
       "api_key": "",
       "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "sd-webui",
       "vision": false,
       "generate": true,
-      "priority": 8
+      "video": false,
+      "audio": false,
+      "priority": 9
     },
     {
       "name": "Nano Banana Pro (via AI/ML API)",
@@ -111,12 +130,12 @@
       "api_key": "your-aimlapi-key",
       "model": "",
       "image_model": "google/nano-banana-pro-edit",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "openai",
       "vision": false,
       "generate": true,
-      "priority": 9
+      "video": false,
+      "audio": false,
+      "priority": 10
     },
     {
       "name": "Nano Banana Pro (via fal.ai)",
@@ -124,17 +143,33 @@
       "api_key": "your-fal-key",
       "model": "",
       "image_model": "",
-      "image_api_key": "",
-      "image_base_url": "",
       "api_format": "fal",
       "vision": false,
       "generate": true,
-      "priority": 10
+      "video": false,
+      "audio": false,
+      "priority": 11
+    },
+    {
+      "name": "xAI Grok Imagine Video 1.5 (I2V)",
+      "base_url": "https://api.x.ai",
+      "api_key": "xai-your-key",
+      "model": "grok-4.5",
+      "video_model": "grok-imagine-video-1.5",
+      "api_format": "xai",
+      "vision": false,
+      "generate": false,
+      "video": true,
+      "audio": false,
+      "priority": 12
     }
   ],
   "defaults": {
     "max_tokens": 4096,
     "timeout_seconds": 300,
-    "retry_count": 2
+    "retry_count": 2,
+    "video_poll_timeout": 600,
+    "max_resolution": "2k",
+    "cooldown_seconds": 2.5
   }
 }

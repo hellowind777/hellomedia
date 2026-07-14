@@ -3,15 +3,28 @@ config.json
 
 # Python
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
+*.py[cod]
+*$py.class
+.Python
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Output
+# Output / runtime
 output/
 *.png
 *.jpg
+*.jpeg
+*.webp
+*.mp4
+*.mp3
+*.wav
 .runtime/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

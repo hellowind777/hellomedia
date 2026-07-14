@@ -1,0 +1,4 @@
+interface:
+  display_name: "HelloMedia"
+  short_description: "Full multimodal skill: understand and generate image, video, and audio. Self-contained image generation with skill channels and Codex/Hermes/OpenClaw auth."
+  default_prompt: "Use the hellomedia skill for image/video/audio understanding or generation. For images, run scripts/generate.py (config.json channels and/or Codex/Hermes/OpenClaw/env/CLI credentials)."
